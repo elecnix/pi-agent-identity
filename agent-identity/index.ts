@@ -422,6 +422,41 @@ export default function (pi: ExtensionAPI) {
 		return { messages: modified };
 	});
 
+	// ── Intercom failure → daemon relay ──────────────────────────────────
+	// When intercom send/ask fails (session not found), route via daemon
+	pi.on("tool_result", async (event) => {
+		if (event.toolName !== "intercom") return;
+		if (!event.isError && event.details) {
+			const d = event.details as Record<string, unknown>;
+			const delivered = d.delivered;
+			if (delivered === false) {
+				// Intercom delivery failed — try daemon relay
+				const input = event.input as Record<string, unknown>;
+				const targetName = input.to as string | undefined;
+				const messageBody = input.message as string | undefined;
+				if (!targetName || !messageBody) return;
+				if (!agentName || connState !== "connected" || !socket?.writable) return;
+
+				socket.write(JSON.stringify({
+					type: "queue_mention",
+					targetName,
+					fromName: agentName,
+					body: messageBody,
+				}) + "\n");
+
+				// Modify the result to indicate relay was attempted
+				const reason = d.reason as string ?? "Session not found";
+				return {
+					content: [{
+						type: "text",
+						text: `⚠️ ${targetName} is offline. Message relayed via GitHub @mention — they'll be revived and respond when the daemon picks it up.`,
+					}],
+					details: { ...d, relayed: true, relayMethod: "github-mention" },
+				};
+			}
+		}
+	});
+
 	// ── Git commit co-author hook ─────────────────────────────────────────
 	pi.on("tool_call", async (event, _ctx) => {
 		if (event.toolName !== "bash") return;

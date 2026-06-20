@@ -395,6 +395,65 @@ function startServer(): net.Server {
               safeWrite(sock, JSON.stringify({ type: "poll_complete" }) + "\n");
               break;
 
+            case "queue_mention": {
+              // Route an intercom message through GitHub @mention for revival
+              const targetName = msg.targetName as string | undefined;
+              const fromName = msg.fromName as string | undefined;
+              const body = msg.body as string | undefined;
+              if (!targetName || !fromName || !body) {
+                safeWrite(sock, JSON.stringify({ type: "error", message: "queue_mention requires targetName, fromName, body" }) + "\n");
+                break;
+              }
+              const target = registry.get(targetName);
+              if (!target) {
+                safeWrite(sock, JSON.stringify({ type: "error", message: `Agent ${targetName} not registered` }) + "\n");
+                break;
+              }
+              if (!target.repo) {
+                safeWrite(sock, JSON.stringify({ type: "error", message: `No repo for ${targetName}` }) + "\n");
+                break;
+              }
+              const [owner, repo] = target.repo.split("/");
+              // Find an open PR to comment on, or create an issue
+              const prs = getOpenPrNumbers(owner, repo);
+              let commentTarget: string; // "pr/N" or "issue/N"
+              if (prs.length > 0) {
+                commentTarget = `pr/${prs[0]}`;
+              } else {
+                // Create a tracking issue for agent communication
+                try {
+                  const out = execSync(
+                    `gh issue create --repo "${owner}/${repo}" --title "Agent relay: ${fromName} → ${targetName}" --body "Cross-agent communication relay. @${targetName} message from @${fromName}:"`,
+                    { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
+                  ).trim();
+                  const m = out.match(/\/(\d+)$/);
+                  commentTarget = m ? `issue/${m[1]}` : "";
+                } catch (err) {
+                  log(`Failed to create relay issue: ${err instanceof Error ? err.message : "?"}`);
+                  safeWrite(sock, JSON.stringify({ type: "error", message: "Failed to create relay issue" }) + "\n");
+                  break;
+                }
+              }
+              if (commentTarget) {
+                try {
+                  const [kind, num] = commentTarget.split("/");
+                  const endpoint = kind === "pr" ? `issues/${num}` : `issues/${num}`; // both use issues API
+                  execSync(
+                    `gh api "repos/${owner}/${repo}/${endpoint}/comments" -f body="@${targetName} message from @${fromName}:\n\n${body.slice(0, 2000)}"`,
+                    { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
+                  );
+                  log(`Queued mention for ${targetName} via ${kind} #${num} in ${owner}/${repo}`);
+                  safeWrite(sock, JSON.stringify({ type: "mention_queued", targetName, target: commentTarget, repo: target.repo }) + "\n");
+                  // Immediately poll so the daemon detects the @mention and revives
+                  setTimeout(() => { try { poll(); } catch {} }, 2000);
+                } catch (err) {
+                  log(`Failed to post relay comment: ${err instanceof Error ? err.message : "?"}`);
+                  safeWrite(sock, JSON.stringify({ type: "error", message: "Failed to post relay comment" }) + "\n");
+                }
+              }
+              break;
+            }
+
             default:
               safeWrite(sock, JSON.stringify({ type: "error", message: `Unknown type: ${msg.type}` }) + "\n");
           }
