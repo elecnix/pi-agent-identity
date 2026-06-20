@@ -427,11 +427,15 @@ function startServer(): net.Server {
               safeWrite(sock, JSON.stringify({ type: "pong" }) + "\n");
               break;
 
-            case "poll_now":
-              safeWrite(sock, JSON.stringify({ type: "poll_started" }) + "\n");
-              try { poll(); } catch (err) { log(`Poll error: ${err instanceof Error ? err.message : "?"}`); }
-              safeWrite(sock, JSON.stringify({ type: "poll_complete" }) + "\n");
+            case "list_agents": {
+              const agents = Array.from(registry.values()).map(r => ({
+                name: r.agentName,
+                connected: r.connected,
+                repo: r.repo,
+              }));
+              safeWrite(sock, JSON.stringify({ type: "agent_list", agents }) + "\n");
               break;
+            }
 
             case "queue_mention": {
               // Route an intercom message directly to daemon for session revival
