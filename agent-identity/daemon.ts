@@ -97,6 +97,41 @@ function saveSeen(): void {
   } catch {}
 }
 
+// ─── Registry persistence ───────────────────────────────────────────────────
+
+const REGISTRY_FILE = "/tmp/agent-identity-daemon-registry.json";
+
+function saveRegistry(): void {
+  try {
+    const data: Record<string, { sessionFile: string; repo: string | null }> = {};
+    for (const [name, reg] of registry) {
+      data[name] = { sessionFile: reg.sessionFile, repo: reg.repo };
+    }
+    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(data), "utf-8");
+  } catch {}
+}
+
+function loadRegistry(): void {
+  try {
+    if (!fs.existsSync(REGISTRY_FILE)) return;
+    const raw = fs.readFileSync(REGISTRY_FILE, "utf-8");
+    const data = JSON.parse(raw) as Record<string, { sessionFile: string; repo: string | null }>;
+    for (const [name, info] of Object.entries(data)) {
+      if (!registry.has(name)) {
+        registry.set(name, {
+          agentName: name,
+          sessionFile: info.sessionFile,
+          socket: null,
+          pid: 0,
+          repo: info.repo,
+          connected: false,
+        });
+      }
+    }
+    log(`Loaded ${registry.size} agents from registry file`);
+  } catch {}
+}
+
 // ─── Registry ───────────────────────────────────────────────────────────────
 
 interface Registration {
@@ -137,6 +172,7 @@ function addRegistration(
 
   registry.set(data.agentName, reg);
   socketRegistry.set(socketKey(sock), reg);
+  saveRegistry();
 
   log(`Registered: ${data.agentName} (session: ${path.basename(data.sessionFile)})${reg.repo ? ` repo: ${reg.repo}` : ""}`);
 }
@@ -148,6 +184,7 @@ function removeRegistration(agentName: string, sock?: net.Socket): void {
 
   if (reg.socket) socketRegistry.delete(socketKey(reg.socket));
   registry.delete(agentName);
+  saveRegistry();
   log(`Unregistered: ${agentName}`);
 }
 
@@ -159,6 +196,7 @@ function removeBySocket(sock: net.Socket): void {
     reg.connected = false;
     reg.socket = null;
     socketRegistry.delete(key);
+    saveRegistry();
     log(`Agent disconnected (revivable): ${reg.agentName}`);
   }
 }
@@ -477,6 +515,8 @@ function cleanup(server: net.Server): void {
   server.close();
   try { fs.unlinkSync(SOCK_FILE); } catch {}
   saveSeen();
+  saveRegistry();
+  try { fs.unlinkSync(REGISTRY_FILE); } catch {}
   try { fs.unlinkSync(PID_FILE); } catch {}
   log("Stopped.");
   process.exit(0);
@@ -492,6 +532,7 @@ function main(): void {
   }
 
   loadSeen();
+  loadRegistry();
   const server = startServer();
 
   process.on("SIGTERM", () => cleanup(server));

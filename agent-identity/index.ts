@@ -435,7 +435,7 @@ export default function (pi: ExtensionAPI) {
 				const targetName = input.to as string | undefined;
 				const messageBody = input.message as string | undefined;
 				if (!targetName || !messageBody) return;
-				if (!agentName || connState !== "connected" || !socket?.writable) return;
+				if (!agentName || !socket?.writable) return;
 
 				socket.write(JSON.stringify({
 					type: "queue_mention",
