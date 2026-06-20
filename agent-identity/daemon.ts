@@ -16,6 +16,9 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, execSync } from "node:child_process";
+import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -28,6 +31,116 @@ const POLL_INTERVAL = Math.max(
   parseInt(process.env["AGENT_IDENTITY_POLL_INTERVAL"] ?? "60", 10) * 1000,
   30_000,
 );
+
+const INTERCOM_BROKER = join(homedir(), ".pi/agent/intercom/broker.sock");
+
+// ─── Intercom broker framing (inlined for standalone daemon) ────────────────
+
+function brokerWrite(sock: net.Socket, msg: unknown): void {
+  const json = JSON.stringify(msg);
+  const payload = Buffer.from(json, "utf-8");
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(payload.length, 0);
+  sock.write(Buffer.concat([header, payload]));
+}
+
+// ─── Ghost session manager ──────────────────────────────────────────────────
+// Maintains intercom broker connections for disconnected agents so they
+// appear online and can receive messages (which trigger session revival).
+
+const ghostSessions = new Map<string, { sock: net.Socket; agentName: string; sessionFile: string }>();
+
+function ghostRegister(agentName: string, sessionFile: string): void {
+  if (ghostSessions.has(agentName)) return;
+  if (!fs.existsSync(INTERCOM_BROKER)) return; // intercom not running
+
+  const sock = net.createConnection(INTERCOM_BROKER);
+  let reader: ReturnType<typeof createBrokerReader>;
+
+  sock.on("connect", () => {
+    brokerWrite(sock, {
+      type: "register",
+      session: {
+        name: agentName,
+        cwd: process.env["HOME"] ?? "/tmp",
+        model: "ghost",
+        pid: process.pid,
+        startedAt: Date.now(),
+        lastActivity: Date.now(),
+        status: "💤 revivable",
+      },
+    });
+    log(`Ghost registered in intercom: ${agentName}`);
+  });
+
+  reader = createBrokerReader((msg: Record<string, unknown>) => {
+    if (msg.type === "send" || msg.type === "ask") {
+      const message = msg.message as Record<string, unknown> | undefined;
+      const text = message?.content && typeof message.content === "object"
+        ? (message.content as Record<string, unknown>).text as string ?? ""
+        : "";
+      const from = (msg.from as string) ?? "unknown";
+      log(`Ghost received intercom ${msg.type} for ${agentName} from ${from}`);
+      // Revive the real session
+      const reg = registry.get(agentName);
+      if (reg) {
+        resumeSession(reg, {
+          from, prNumber: 0,
+          body: `📨 Intercom ${msg.type} from @${from}:\n\n${String(text).slice(0, 800)}\n\nReply using intercom({ action: "reply", message: "..." }).`,
+          url: "", repo: reg.repo ?? "", agentName, commentId: Date.now(),
+        });
+      }
+    }
+    if (msg.type === "session_joined") {
+      // Real session came online — kill ghost
+      const session = msg.session as Record<string, unknown> | undefined;
+      if (session?.name === agentName) {
+        log(`Real session joined for ${agentName}, removing ghost`);
+        ghostRemove(agentName);
+      }
+    }
+  }, (err: Error) => {
+    log(`Ghost broker error for ${agentName}: ${err.message}`);
+    ghostRemove(agentName);
+  });
+
+  sock.on("data", (data: Buffer) => reader(data));
+  sock.on("close", () => ghostRemove(agentName));
+  sock.on("error", () => ghostRemove(agentName));
+
+  ghostSessions.set(agentName, { sock, agentName, sessionFile });
+}
+
+function ghostRemove(agentName: string): void {
+  const g = ghostSessions.get(agentName);
+  if (!g) return;
+  ghostSessions.delete(agentName);
+  try { g.sock.destroy(); } catch {}
+  log(`Ghost removed: ${agentName}`);
+}
+
+function createBrokerReader(
+  onMessage: (msg: Record<string, unknown>) => void,
+  onError: (err: Error) => void,
+) {
+  let buf = Buffer.alloc(0);
+  return (data: Buffer) => {
+    buf = Buffer.concat([buf, data]);
+    while (buf.length >= 4) {
+      const len = buf.readUInt32BE(0);
+      if (buf.length < 4 + len) break;
+      const payload = buf.subarray(4, 4 + len);
+      buf = buf.subarray(4 + len);
+      try {
+        const msg = JSON.parse(payload.toString("utf-8")) as Record<string, unknown>;
+        onMessage(msg);
+      } catch (err) {
+        onError(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+    }
+  };
+}
 
 // ─── Singleton ──────────────────────────────────────────────────────────────
 
@@ -174,6 +287,9 @@ function addRegistration(
   socketRegistry.set(socketKey(sock), reg);
   saveRegistry();
 
+  // Kill ghost if we had one (real session is back)
+  ghostRemove(data.agentName);
+
   log(`Registered: ${data.agentName} (session: ${path.basename(data.sessionFile)})${reg.repo ? ` repo: ${reg.repo}` : ""}`);
 }
 
@@ -198,6 +314,8 @@ function removeBySocket(sock: net.Socket): void {
     socketRegistry.delete(key);
     saveRegistry();
     log(`Agent disconnected (revivable): ${reg.agentName}`);
+    // Create ghost intercom session so agent appears online
+    ghostRegister(reg.agentName, reg.sessionFile);
   }
 }
 
@@ -513,6 +631,7 @@ function startServer(): net.Server {
 
 function cleanup(server: net.Server): void {
   log("Shutting down...");
+  for (const [name] of ghostSessions) ghostRemove(name);
   for (const reg of registry.values()) {
     if (reg.socket) try { reg.socket.end(); } catch {}
   }
