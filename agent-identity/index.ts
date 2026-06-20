@@ -63,12 +63,12 @@ let pingTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectDelay = 1000; // starts at 1s, backs off to max 30s
 let sessionFile: string | null = null;
 let piRef: ExtensionAPI | null = null;
+let updateStatus: ((state: ConnState) => void) | null = null;
 let shuttingDown = false;
 
 function setConnState(state: ConnState) {
 	connState = state;
-	// Don't touch ctx/pi from timer callbacks — they may be stale.
-	// UI updates come from session_start which has a fresh ctx.
+	try { updateStatus?.(state); } catch {}
 }
 
 // ─── System prompt fragment ──────────────────────────────────────────────────
@@ -363,6 +363,13 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI) {
 			ctx.ui.notify(`Agent identity: ${agentName}`, "info");
 			ctx.ui.setStatus("agent-identity", `🟡 ${agentName} (connecting to daemon...)`);
+			// Safe status updater bound to this session's ctx
+			updateStatus = (state: ConnState) => {
+				try {
+					const icon = state === "connected" ? "🟢" : state === "connecting" ? "🟡" : "🔴";
+					ctx.ui.setStatus("agent-identity", `${icon} ${agentName} (${state})`);
+				} catch {}
+			};
 		}
 
 		// Connect to daemon (updates status on success/failure)
@@ -398,7 +405,8 @@ export default function (pi: ExtensionAPI) {
 		// Disconnect from daemon (don't unregister — allow revival)
 		disconnectFromDaemon(false);
 
-		// Clear status
+		// Clear status updater and UI
+		updateStatus = null;
 		ctx.ui.setStatus("agent-identity", undefined);
 
 		piRef = null;
