@@ -449,9 +449,9 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{
 						type: "text",
-						text: `⚠️ ${targetName} is offline. Message relayed via GitHub @mention — they'll be revived and respond when the daemon picks it up.`,
+						text: `⚠️ ${targetName} is offline. Message relayed via daemon — they'll be revived and respond shortly.`,
 					}],
-					details: { ...d, relayed: true, relayMethod: "github-mention" },
+					details: { ...d, relayed: true, relayMethod: "daemon-revival" },
 				};
 			}
 		}
