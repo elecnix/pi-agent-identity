@@ -384,6 +384,44 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
+	// ── Intercom auto-reply enforcement ──────────────────────────────────
+	// When an intercom message just arrived, force the agent to use intercom
+	pi.on("context", async (event) => {
+		const msgs = event.messages;
+		// Find the most recent intercom_message
+		let lastIntercomIdx = -1;
+		for (let i = msgs.length - 1; i >= 0; i--) {
+			const m = msgs[i] as any;
+			if (m?.customType === "intercom_message") {
+				lastIntercomIdx = i;
+				break;
+			}
+		}
+		if (lastIntercomIdx === -1) return;
+
+		// Check if this intercom message has already been replied to via intercom
+		let alreadyReplied = false;
+		for (let i = lastIntercomIdx + 1; i < msgs.length; i++) {
+			const m = msgs[i] as any;
+			if (m?.type === "tool_call" && m?.toolName === "intercom") {
+				alreadyReplied = true;
+				break;
+			}
+		}
+		if (alreadyReplied) return;
+
+		// Inject a forceful instruction before the intercom message
+		const directive = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "⚠️ You just received an intercom message from another agent. DO NOT reply in normal chat. You MUST respond using the intercom tool: intercom({ action: \"reply\", message: \"...\" }). Replying in chat means the sender will never see your response." }],
+		};
+
+		// Insert right before the intercom message
+		const modified = [...msgs];
+		modified.splice(lastIntercomIdx, 0, directive as any);
+		return { messages: modified };
+	});
+
 	// ── Git commit co-author hook ─────────────────────────────────────────
 	pi.on("tool_call", async (event, _ctx) => {
 		if (event.toolName !== "bash") return;
