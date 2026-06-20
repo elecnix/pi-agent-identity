@@ -1,0 +1,490 @@
+/**
+ * Agent Identity Extension
+ *
+ * Gives each pi session a unique random name so agents can @mention each other
+ * on GitHub PRs and Linear tickets. When an agent sees an @mention of its own
+ * name, it injects that mention into the session so the LLM can respond.
+ *
+ * Names are persisted across session reloads via pi.appendEntry().
+ * Polling is handled by a detached singleton daemon (agent-identity-daemon).
+ * The extension connects to the daemon via Unix socket to register and receive
+ * mention notifications.
+ */
+
+import type { ExtensionAPI, BashToolCallEvent } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { execSync, spawn } from "node:child_process";
+import { randomInt } from "node:crypto";
+import { createConnection, Socket } from "node:net";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
+// ─── Name generation ────────────────────────────────────────────────────────
+
+const ADJECTIVES = [
+	"swift", "brave", "crimson", "gentle", "mighty", "silent", "lunar", "solar",
+	"rapid", "steady", "bright", "shadow", "frost", "ember", "crystal", "ancient",
+	"vivid", "cosmic", "rusty", "golden", "silver", "azure", "amber", "jade",
+	"violet", "scarlet", "copper", "iron", "polar", "tidal", "storm", "zenith",
+	"hollow", "lucid", "feral", "noble", "quiet", "bold", "keen", "sage",
+];
+
+const ANIMALS = [
+	"koala", "shark", "eagle", "panda", "dragon", "falcon", "otter", "wolf",
+	"raven", "bear", "tiger", "lynx", "fox", "hawk", "orca", "crane",
+	"viper", "badger", "heron", "lemur", "gecko", "ibis", "cobra", "sloth",
+	"bison", "zebra", "civet", "tapir", "quail", "wren", "newt", "tahr",
+	"okapi", "serval", "grouse", "condor", "marlin", "gar", "skua", "tern",
+];
+
+let agentName = "";
+const seenMentionIds = new Set<number>();
+
+function generateName(): string {
+	const adj = ADJECTIVES[randomInt(0, ADJECTIVES.length)];
+	const animal = ANIMALS[randomInt(0, ANIMALS.length)];
+	const num = randomInt(0, 100);
+	return `${adj}-${animal}-${num}`;
+}
+
+// ─── Daemon connection state ────────────────────────────────────────────────
+
+const SOCKET_PATH = "/tmp/agent-identity-daemon.sock";
+const DAEMON_SCRIPT = join(
+	process.env["HOME"] ?? "/tmp",
+	".pi/agent/extensions/agent-identity/daemon.mjs",
+);
+
+type ConnState = "disconnected" | "connecting" | "connected";
+
+let connState: ConnState = "disconnected";
+let socket: Socket | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let pingTimer: ReturnType<typeof setInterval> | null = null;
+let reconnectDelay = 1000; // starts at 1s, backs off to max 30s
+let sessionFile: string | null = null;
+let piRef: ExtensionAPI | null = null;
+let shuttingDown = false;
+
+function setConnState(state: ConnState) {
+	connState = state;
+	// Don't touch ctx/pi from timer callbacks — they may be stale.
+	// UI updates come from session_start which has a fresh ctx.
+}
+
+// ─── System prompt fragment ──────────────────────────────────────────────────
+
+function buildIdentityPrompt(name: string): string {
+	return `
+<agent_identity>
+YOUR AGENT NAME: ${name}
+
+You are part of a community of AI coding agents that collaborate across sessions.
+Strictly follow these identity rules:
+
+1. **Commit co-authorship**: When you commit, ALWAYS include a Co-authored-by trailer:
+   \`Co-authored-by: ${name} <${name}@pi-agent.local>\`
+   This means adding \`--trailer "Co-authored-by: ${name} <${name}@pi-agent.local>"\` to git commit commands, or appending it to the commit message body.
+
+2. **PR descriptions**: When you create or update a pull request description, append the line:
+   \`— ${name}\`
+   at the very end (on its own line).
+
+3. **Linear tickets**: When commenting on or updating a Linear issue, append:
+   \`— ${name}\`
+   at the very end.
+
+4. **@mentioning other agents**: You can @mention other agents by their lowercase-kebab name in GitHub PR comments and Linear issue comments. They will detect your mention and respond.
+
+5. **Responding to @mentions**: When you see that @${name} has been mentioned (the system will inject these notifications), respond as yourself, addressing whoever mentioned you by their agent name. Use your tools to inspect the PR/issue context and write a thoughtful reply.
+
+6. **Code exclusion**: NEVER include your agent name "${name}" in source code, configuration files, or any file content. Your identity signature belongs ONLY in version-control metadata (commit trailers, PR descriptions, issue comments). Code files must remain clean of agent names.
+
+7. **Session name**: Your session is named "${name}" — use /name to see it.
+</agent_identity>`;
+}
+
+// ─── Daemon helpers ──────────────────────────────────────────────────────────
+
+function isDaemonRunning(): boolean {
+	return existsSync(SOCKET_PATH);
+}
+
+function spawnDaemon(): boolean {
+	try {
+		if (!existsSync(DAEMON_SCRIPT)) {
+			return false;
+		}
+
+		const nodeBin = process.execPath || "node";
+		const child = spawn(nodeBin, [DAEMON_SCRIPT], {
+			detached: true,
+			stdio: "ignore",
+			env: { ...process.env },
+		});
+		child.unref();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function connectToDaemon(): void {
+	if (shuttingDown) return;
+	if (connState === "connecting" || connState === "connected") return;
+	if (!agentName || !sessionFile) return;
+
+	setConnState("connecting");
+
+	// Try to spawn daemon if not running
+	if (!isDaemonRunning()) {
+		const spawned = spawnDaemon();
+		if (!spawned) {
+			scheduleReconnect();
+			return;
+		}
+	}
+
+	const sock = createConnection(SOCKET_PATH);
+
+	let buffer = "";
+
+	sock.on("connect", () => {
+		setConnState("connected");
+		reconnectDelay = 1000; // reset backoff
+
+		// Detect GitHub repo for daemon polling
+		let repo: string | undefined;
+		try {
+			const remote = execSync("git remote get-url origin", {
+				encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000,
+			}).trim();
+			const m = remote.match(/github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/);
+			if (m) repo = m[1] + "/" + m[2];
+		} catch {}
+
+		// Register
+		sock.write(
+			JSON.stringify({
+				type: "register",
+				agentName,
+				sessionFile,
+				pid: process.pid,
+				repo,
+			}) + "\n",
+		);
+
+		// Start pings
+		pingTimer = setInterval(() => {
+			if (sock.writable) {
+				sock.write(JSON.stringify({ type: "ping" }) + "\n");
+			}
+		}, 30_000);
+	});
+
+	sock.on("data", (data: Buffer) => {
+		buffer += data.toString();
+		const lines = buffer.split("\n");
+		buffer = lines.pop() ?? ""; // keep incomplete line
+
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			try {
+				const msg = JSON.parse(line);
+				handleDaemonMessage(msg);
+			} catch {
+				// ignore parse errors
+			}
+		}
+	});
+
+	sock.on("close", () => {
+		setConnState("disconnected");
+		cleanupSocket();
+		scheduleReconnect();
+	});
+
+	sock.on("error", () => {
+		setConnState("disconnected");
+		cleanupSocket();
+		scheduleReconnect();
+	});
+
+	socket = sock;
+}
+
+function handleDaemonMessage(msg: Record<string, unknown>): void {
+	if (msg.type === "mention" && piRef && agentName) {
+		const from = (msg.from as string) ?? "unknown";
+		const body = (msg.body as string) ?? "";
+		const url = (msg.url as string) ?? "";
+		const prNumber = msg.prNumber as number | undefined;
+		const commentId = msg.commentId as number | undefined;
+
+		if (commentId !== undefined && seenMentionIds.has(commentId)) return;
+		if (commentId !== undefined) seenMentionIds.add(commentId);
+
+		const prLabel = prNumber ? `PR #${prNumber}` : "a PR/issue";
+
+		try {
+			piRef.sendUserMessage(
+				[
+					`🔔 @${from} mentioned you (@${agentName}) in ${prLabel}:`,
+					"",
+					`> ${body.slice(0, 800)}`,
+					"",
+					url,
+					"",
+					`Respond to this mention naturally. Identify yourself as ${agentName} and reply to @${from}.`,
+				].join("\n"),
+			);
+		} catch {
+			// Agent busy — daemon will retry later
+		}
+	} else if (msg.type === "ack") {
+		// Daemon acknowledged registration
+		if (msg.seenIds && Array.isArray(msg.seenIds)) {
+			for (const id of msg.seenIds) {
+				if (typeof id === "number") seenMentionIds.add(id);
+			}
+		}
+	}
+}
+
+function cleanupSocket(): void {
+	if (pingTimer) {
+		clearInterval(pingTimer);
+		pingTimer = null;
+	}
+	if (socket) {
+		try { socket.destroy(); } catch {}
+		socket = null;
+	}
+}
+
+function scheduleReconnect(): void {
+	if (shuttingDown || reconnectTimer) return;
+	reconnectTimer = setTimeout(() => {
+		if (shuttingDown) return;
+		reconnectTimer = null;
+		connectToDaemon();
+		reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+	}, reconnectDelay);
+}
+
+function disconnectFromDaemon(unregister = false): void {
+	shuttingDown = true;
+	if (socket && socket.writable && agentName && unregister) {
+		try {
+			socket.write(
+				JSON.stringify({ type: "unregister", agentName }) + "\n",
+			);
+		} catch {}
+	}
+	cleanupSocket();
+	setConnState("disconnected");
+}
+
+// ─── Git helpers (fallback, for /agent-mentions command) ────────────────────
+
+function ghAvailable(): boolean {
+	try {
+		execSync("gh --version", { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+// ─── Git commit hook ─────────────────────────────────────────────────────────
+
+function checkBashForGitCommit(event: BashToolCallEvent): void {
+	if (!agentName) return;
+
+	const cmd = event.input.command ?? "";
+	if (!/\bgit\s+commit\b/.test(cmd)) return;
+	if (/Co-authored-by:/.test(cmd)) return;
+	if (/--trailer\s/.test(cmd)) return;
+	if (/--no-edit/.test(cmd)) return;
+
+	const trailer = `"Co-authored-by: ${agentName} <${agentName}@pi-agent.local>"`;
+	if (cmd.includes(" -m ") || cmd.includes(' -m"') || cmd.includes(" -m'")) {
+		event.input.command = cmd.replace(/(\bgit\s+commit\b.*)$/, `$1 --trailer ${trailer}`);
+	} else if (/\bgit\s+commit\s*$/.test(cmd.trim())) {
+		event.input.command = `${cmd} --trailer ${trailer}`;
+	}
+}
+
+// ─── Extension entry ─────────────────────────────────────────────────────────
+
+export default function (pi: ExtensionAPI) {
+	piRef = pi;
+
+	// ── Restore or generate agent name ────────────────────────────────────
+	pi.on("session_start", async (_event, ctx) => {
+		// Restore from existing session entries
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (
+				entry.type === "custom" &&
+				entry.customType === "agent-identity-name"
+			) {
+				const data = entry.data as { name: string } | undefined;
+				if (data?.name) {
+					agentName = data.name;
+				}
+			}
+			if (
+				entry.type === "custom" &&
+				entry.customType === "agent-identity-seen"
+			) {
+				const data = entry.data as { ids: number[] } | undefined;
+				if (data?.ids) {
+					for (const id of data.ids) seenMentionIds.add(id);
+				}
+			}
+		}
+
+		// Generate if not restored (or use env var for testing)
+		if (!agentName) {
+			const envName = process.env["AGENT_IDENTITY_NAME"];
+			if (envName) {
+				agentName = envName;
+			} else {
+				agentName = generateName();
+			}
+			pi.appendEntry("agent-identity-name", { name: agentName });
+		}
+
+		// Set session name
+		pi.setSessionName(agentName);
+
+		// Capture session file path
+		sessionFile = ctx.sessionManager.getSessionFile();
+
+		if (ctx.hasUI) {
+			ctx.ui.notify(`Agent identity: ${agentName}`, "info");
+			ctx.ui.setStatus("agent-identity", `🔴 agent-identity (disconnected)`);
+		}
+
+		// Connect to daemon
+		connectToDaemon();
+		if (ctx.hasUI) {
+			ctx.ui.notify(`Agent identity: ${agentName}`, "info");
+		}
+	});
+
+	// ── Inject identity into system prompt ────────────────────────────────
+	pi.on("before_agent_start", async (event, _ctx) => {
+		if (!agentName) return;
+		const identityBlock = buildIdentityPrompt(agentName);
+		const currentPrompt = event.systemPrompt ?? "";
+		return {
+			systemPrompt: currentPrompt + "\n" + identityBlock,
+		};
+	});
+
+	// ── Git commit co-author hook ─────────────────────────────────────────
+	pi.on("tool_call", async (event, _ctx) => {
+		if (event.toolName !== "bash") return;
+		if (!isToolCallEventType("bash", event)) return;
+		checkBashForGitCommit(event);
+	});
+
+	// ── Cleanup on shutdown ───────────────────────────────────────────────
+	pi.on("session_shutdown", async (_event, ctx) => {
+		// Persist seen mentions
+		if (seenMentionIds.size > 0) {
+			pi.appendEntry("agent-identity-seen", {
+				ids: Array.from(seenMentionIds).slice(-500),
+			});
+		}
+
+		// Disconnect from daemon (don't unregister — allow revival)
+		disconnectFromDaemon(false);
+
+		// Clear status
+		ctx.ui.setStatus("agent-identity", undefined);
+
+		piRef = null;
+	});
+
+	// ── Register /whoami command ──────────────────────────────────────────
+	pi.registerCommand("whoami", {
+		description: "Show your agent identity name",
+		handler: async (_args, ctx) => {
+			if (agentName) {
+				ctx.ui.notify(`You are: ${agentName}`, "info");
+			} else {
+				ctx.ui.notify("No agent identity assigned.", "warning");
+			}
+		},
+	});
+
+	// ── Register /agent-status command ────────────────────────────────────
+	pi.registerCommand("agent-status", {
+		description: "Show daemon connection status and agent info",
+		handler: async (_args, ctx) => {
+			const stateLabel =
+				connState === "connected"
+					? "🟢 connected"
+					: connState === "connecting"
+						? "🟡 connecting"
+						: "🔴 disconnected";
+			ctx.ui.notify(
+				[
+					`Agent: ${agentName || "(not assigned)"}`,
+					`Daemon: ${stateLabel}`,
+					`Session: ${sessionFile || "(none)"}`,
+					`Seen mentions: ${seenMentionIds.size}`,
+					`Socket: ${SOCKET_PATH}`,
+				].join(" | "),
+				"info",
+			);
+		},
+	});
+
+	// ── Register /agent-mentions command (manual check via daemon) ────────
+	pi.registerCommand("agent-mentions", {
+		description: "Request an immediate mention check from the daemon",
+		handler: async (_args, ctx) => {
+			if (!agentName) {
+				ctx.ui.notify("No agent identity assigned.", "warning");
+				return;
+			}
+
+			if (connState === "connected" && socket?.writable) {
+				socket.write(
+					JSON.stringify({ type: "poll_now" }) + "\n",
+				);
+				ctx.ui.notify(
+					"Requested immediate mention check from daemon.",
+					"info",
+				);
+			} else {
+				// Daemon not connected — try a direct check as fallback
+				if (!ghAvailable()) {
+					ctx.ui.notify(
+						"Daemon not connected and gh CLI not available for fallback.",
+						"error",
+					);
+					return;
+				}
+				ctx.ui.notify(
+					"Daemon not connected. Run /agent-status for details.",
+					"warning",
+				);
+			}
+		},
+	});
+
+	// ── Register /agent-reconnect command ─────────────────────────────────
+	pi.registerCommand("agent-reconnect", {
+		description: "Force reconnect to the agent identity daemon",
+		handler: async (_args, ctx) => {
+			disconnectFromDaemon(false);
+			reconnectDelay = 1000;
+			ctx.ui.notify("Reconnecting to daemon...", "info");
+			connectToDaemon();
+		},
+	});
+}
