@@ -17,7 +17,8 @@ import { execSync, spawn } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { createConnection, Socket } from "node:net";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -50,10 +51,8 @@ function generateName(): string {
 // ─── Daemon connection state ────────────────────────────────────────────────
 
 const SOCKET_PATH = "/tmp/agent-identity-daemon.sock";
-const DAEMON_SCRIPT = join(
-	process.env["HOME"] ?? "/tmp",
-	".pi/agent/extensions/agent-identity/daemon.mjs",
-);
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+const DAEMON_SCRIPT = join(EXTENSION_DIR, "daemon.ts");
 
 type ConnState = "disconnected" | "connecting" | "connected";
 
@@ -117,7 +116,7 @@ function spawnDaemon(): boolean {
 		}
 
 		const nodeBin = process.execPath || "node";
-		const child = spawn(nodeBin, [DAEMON_SCRIPT], {
+		const child = spawn(nodeBin, ["--experimental-strip-types", DAEMON_SCRIPT], {
 			detached: true,
 			stdio: "ignore",
 			env: { ...process.env },
@@ -363,14 +362,11 @@ export default function (pi: ExtensionAPI) {
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`Agent identity: ${agentName}`, "info");
-			ctx.ui.setStatus("agent-identity", `🔴 agent-identity (disconnected)`);
+			ctx.ui.setStatus("agent-identity", `🟡 ${agentName} (connecting to daemon...)`);
 		}
 
-		// Connect to daemon
+		// Connect to daemon (updates status on success/failure)
 		connectToDaemon();
-		if (ctx.hasUI) {
-			ctx.ui.notify(`Agent identity: ${agentName}`, "info");
-		}
 	});
 
 	// ── Inject identity into system prompt ────────────────────────────────
