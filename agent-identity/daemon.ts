@@ -516,7 +516,6 @@ function cleanup(server: net.Server): void {
   try { fs.unlinkSync(SOCK_FILE); } catch {}
   saveSeen();
   saveRegistry();
-  try { fs.unlinkSync(REGISTRY_FILE); } catch {}
   try { fs.unlinkSync(PID_FILE); } catch {}
   log("Stopped.");
   process.exit(0);
