@@ -107,36 +107,6 @@ function isDaemonRunning(): boolean {
 	return existsSync(SOCKET_PATH);
 }
 
-async function queryDaemonAgents(): Promise<Array<{ name: string; connected: boolean; repo: string | null }>> {
-	return new Promise((resolve, reject) => {
-		if (!socket || socket.destroyed) return reject(new Error("No socket"));
-		const sock = createConnection(SOCKET_PATH);
-		let buf = "";
-		const timer = setTimeout(() => { try { sock.destroy(); } catch {}; reject(new Error("timeout")); }, 3000);
-		sock.on("connect", () => {
-			sock.write(JSON.stringify({ type: "list_agents" }) + "\n");
-		});
-		sock.on("data", (data: Buffer) => {
-			buf += data.toString();
-			const lines = buf.split("\n");
-			buf = lines.pop() ?? "";
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const msg = JSON.parse(line);
-					if (msg.type === "agent_list") {
-						clearTimeout(timer);
-						sock.destroy();
-						resolve(msg.agents ?? []);
-						return;
-					}
-				} catch {}
-			}
-		});
-		sock.on("error", () => { clearTimeout(timer); reject(new Error("socket error")); });
-	});
-}
-
 function spawnDaemon(): boolean {
 	try {
 		if (!existsSync(DAEMON_SCRIPT)) {
@@ -453,34 +423,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── Intercom failure → daemon relay ──────────────────────────────────
-	// When intercom send/ask fails (session not found), route via daemon
-	// When intercom list succeeds, append offline agents from daemon registry
+	// When intercom send/ask fails (session not found), route via daemon.
+	// Disconnected agents already appear in the intercom broker's session list
+	// via ghost registration (daemon.ts), so no separate augmentation is needed.
 	pi.on("tool_result", async (event) => {
 		if (event.toolName !== "intercom") return;
 
 		const input = event.input as Record<string, unknown>;
-
-		// Augment intercom list with offline agents from daemon
-		if (input.action === "list" && !event.isError && socket?.writable) {
-			try {
-				const agents = await queryDaemonAgents();
-				if (agents.length > 0) {
-					// Read existing content text
-					const contentArr = event.content as Array<{ type: string; text: string }>;
-					let text = contentArr[0]?.text ?? "";
-					text += "\n\n**Revivable agents (daemon):**\n";
-					for (const a of agents) {
-						const icon = a.connected ? "🟢" : "💤";
-						text += `${icon} ${a.name}${a.repo ? ` (${a.repo})` : ""}\n`;
-					}
-					return {
-						content: [{ type: "text", text }],
-						details: event.details,
-					};
-				}
-			} catch { /* daemon query failed, leave list as-is */ }
-			return;
-		}
 
 		// Intercom delivery failure → daemon relay
 		if (event.details) {
