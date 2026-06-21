@@ -2,9 +2,9 @@
 /**
  * Agent Identity Daemon
  *
- * Standalone singleton daemon that polls GitHub PRs and Linear for @mentions
- * of AI agent names. Pi sessions register via Unix socket; the daemon delivers
- * mentions in real-time or resumes disconnected sessions.
+ * Standalone singleton daemon that tracks agent sessions for revival.
+ * Pi sessions register via Unix socket; the daemon delivers intercom
+ * messages via session revival when targets are disconnected.
  *
  * Start:   npx tsx daemon.ts
  * Stop:    kill $(cat /tmp/agent-identity-daemon.pid)
@@ -15,7 +15,7 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -24,13 +24,7 @@ import { join } from "node:path";
 
 const PID_FILE = "/tmp/agent-identity-daemon.pid";
 const SOCK_FILE = "/tmp/agent-identity-daemon.sock";
-const SEEN_FILE = "/tmp/agent-identity-daemon-seen.json";
 const LOG_FILE = "/tmp/agent-identity-daemon.log";
-
-const POLL_INTERVAL = Math.max(
-  parseInt(process.env["AGENT_IDENTITY_POLL_INTERVAL"] ?? "60", 10) * 1000,
-  30_000,
-);
 
 const INTERCOM_BROKER = join(homedir(), ".pi/agent/intercom/broker.sock");
 
@@ -186,30 +180,6 @@ function safeWrite(sock: net.Socket, data: string): void {
   } catch {}
 }
 
-// ─── Seen mentions persistence ──────────────────────────────────────────────
-
-const seenMentionIds = new Set<number>();
-
-function loadSeen(): void {
-  try {
-    const raw = fs.readFileSync(SEEN_FILE, "utf-8");
-    const data = JSON.parse(raw) as { ids: number[] };
-    if (Array.isArray(data.ids)) {
-      for (const id of data.ids) {
-        if (typeof id === "number") seenMentionIds.add(id);
-      }
-      log(`Loaded ${seenMentionIds.size} seen mention IDs`);
-    }
-  } catch {}
-}
-
-function saveSeen(): void {
-  try {
-    const ids = Array.from(seenMentionIds).slice(-2000);
-    fs.writeFileSync(SEEN_FILE, JSON.stringify({ ids }), "utf-8");
-  } catch {}
-}
-
 // ─── Registry persistence ───────────────────────────────────────────────────
 
 const REGISTRY_FILE = "/tmp/agent-identity-daemon-registry.json";
@@ -319,140 +289,7 @@ function removeBySocket(sock: net.Socket): void {
   }
 }
 
-function getDistinctRepos(): string[] {
-  const repos = new Set<string>();
-  for (const reg of registry.values()) {
-    if (reg.repo) repos.add(reg.repo);
-  }
-  return Array.from(repos);
-}
-
-// ─── GitHub helpers ─────────────────────────────────────────────────────────
-
-function ghAvailable(): boolean {
-  try {
-    execSync("gh --version", { stdio: "ignore", timeout: 5000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function getOpenPrNumbers(owner: string, repo: string): number[] {
-  try {
-    const raw = execSync(
-      `gh pr list --repo "${owner}/${repo}" --state open --json number --jq '.[].number'`,
-      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
-    );
-    return raw.trim().split("\n").filter(Boolean).map(Number).filter((n) => !isNaN(n));
-  } catch {
-    return [];
-  }
-}
-
-interface GhComment {
-  id: number;
-  body: string;
-  user: string | null;
-  url: string;
-  type: string;
-}
-
-function fetchPrComments(owner: string, repo: string, prNumber: number): GhComment[] {
-  const comments: GhComment[] = [];
-
-  // Issue comments
-  try {
-    const raw = execSync(
-      `gh api "repos/${owner}/${repo}/issues/${prNumber}/comments" --jq '.[] | {id: .id, body: .body, user: .user.login, url: .html_url, type: "issue"}'`,
-      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
-    );
-    for (const line of raw.trim().split("\n").filter(Boolean)) {
-      try { comments.push(JSON.parse(line) as GhComment); } catch {}
-    }
-  } catch {}
-
-  // Review comments
-  try {
-    const raw = execSync(
-      `gh api "repos/${owner}/${repo}/pulls/${prNumber}/comments" --jq '.[] | {id: .id, body: .body, user: .user.login, url: .html_url, type: "review"}'`,
-      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
-    );
-    for (const line of raw.trim().split("\n").filter(Boolean)) {
-      try { comments.push(JSON.parse(line) as GhComment); } catch {}
-    }
-  } catch {}
-
-  return comments;
-}
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// ─── Polling ────────────────────────────────────────────────────────────────
-
-function poll(): void {
-  if (!ghAvailable()) return;
-
-  const repos = getDistinctRepos();
-  const envRepo = process.env["AGENT_IDENTITY_REPO"];
-  if (repos.length === 0 && envRepo) {
-    repos.push(envRepo);
-  }
-  if (repos.length === 0) return;
-
-  for (const repoFull of repos) {
-    const parts = repoFull.split("/");
-    if (parts.length !== 2) continue;
-    const [owner, repo] = parts as [string, string];
-
-    const prs = getOpenPrNumbers(owner, repo);
-
-    for (const prNumber of prs) {
-      const comments = fetchPrComments(owner, repo, prNumber);
-
-      for (const comment of comments) {
-        if (seenMentionIds.has(comment.id)) continue;
-        if (!comment.body) continue;
-
-        for (const [agentName, reg] of registry) {
-          if (!agentName) continue;
-
-          const pattern = new RegExp(`@${escapeRegex(agentName)}\\b`, "i");
-
-          if (pattern.test(comment.body)) {
-            seenMentionIds.add(comment.id);
-
-            const from = comment.user ?? "unknown";
-            const payload = {
-              type: "mention" as const,
-              from,
-              prNumber,
-              body: comment.body.slice(0, 800),
-              url: comment.url,
-              repo: repoFull,
-              agentName,
-              commentId: comment.id,
-            };
-
-            // Deliver: live if connected, otherwise revive session
-            if (reg.connected && reg.socket?.writable) {
-              safeWrite(reg.socket, JSON.stringify(payload) + "\n");
-              log(`Delivered mention to ${agentName} (live): PR #${prNumber} by @${from}`);
-            } else if (!reg.connected) {
-              log(`Agent ${agentName} disconnected, attempting session revival...`);
-              resumeSession(reg, payload);
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  saveSeen();
-}
+// ─── Session revival ───────────────────────────────────────────────────────
 
 function resumeSession(reg: Registration, mention: Record<string, unknown>): void {
   if (!reg.sessionFile || !fs.existsSync(reg.sessionFile)) {
@@ -461,13 +298,9 @@ function resumeSession(reg: Registration, mention: Record<string, unknown>): voi
   }
 
   const msg = [
-    `🔔 **You were mentioned by @${mention["from"]}** in PR #${mention["prNumber"]}:`,
+    `🔔 **Message for @${mention["from"]}**:`,
     "",
     `> ${(mention["body"] as string).slice(0, 800)}`,
-    "",
-    `URL: ${mention["url"]}`,
-    "",
-    `Respond to this mention on GitHub. Identify yourself as ${reg.agentName} and reply to @${mention["from"]} in the PR.`,
   ].join("\n");
 
   log(`Resuming session for ${reg.agentName}: ${reg.sessionFile}`);
@@ -528,7 +361,6 @@ function startServer(): net.Server {
               safeWrite(sock, JSON.stringify({
                 type: "ack",
                 agentName: msg.agentName,
-                seenIds: Array.from(seenMentionIds).slice(-2000),
               }) + "\n");
               break;
 
@@ -637,7 +469,6 @@ function cleanup(server: net.Server): void {
   }
   server.close();
   try { fs.unlinkSync(SOCK_FILE); } catch {}
-  saveSeen();
   saveRegistry();
   try { fs.unlinkSync(PID_FILE); } catch {}
   log("Stopped.");
@@ -653,7 +484,6 @@ function main(): void {
     process.exit(0);
   }
 
-  loadSeen();
   loadRegistry();
   const server = startServer();
 
@@ -667,16 +497,6 @@ function main(): void {
     if (err.message?.includes('EPIPE')) return;
     log(`Uncaught: ${err.message}`);
   });
-
-  log(`Polling every ${POLL_INTERVAL / 1000}s`);
-
-  setTimeout(() => {
-    try { poll(); } catch (err) { log(`Poll err: ${err instanceof Error ? err.message : "?"}`); }
-  }, 5000);
-
-  setInterval(() => {
-    try { poll(); } catch (err) { log(`Poll err: ${err instanceof Error ? err.message : "?"}`); }
-  }, POLL_INTERVAL);
 
   log(`Ready (PID ${process.pid})`);
 }
