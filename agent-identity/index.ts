@@ -150,7 +150,7 @@ function connectToDaemon(): void {
 		setConnState("connected");
 		reconnectDelay = 1000; // reset backoff
 
-		// Detect GitHub repo for daemon polling
+		// Detect repo from git remote for daemon registration
 		let repo: string | undefined;
 		try {
 			const remote = execSync("git remote get-url origin", {
@@ -238,13 +238,6 @@ function handleDaemonMessage(msg: Record<string, unknown>): void {
 		} catch {
 			// Agent busy — daemon will retry later
 		}
-	} else if (msg.type === "ack") {
-		// Daemon acknowledged registration
-		if (msg.seenIds && Array.isArray(msg.seenIds)) {
-			for (const id of msg.seenIds) {
-				if (typeof id === "number") seenMentionIds.add(id);
-			}
-		}
 	}
 }
 
@@ -280,17 +273,6 @@ function disconnectFromDaemon(unregister = false): void {
 	}
 	cleanupSocket();
 	setConnState("disconnected");
-}
-
-// ─── Git helpers (fallback, for /agent-mentions command) ────────────────────
-
-function ghAvailable(): boolean {
-	try {
-		execSync("gh --version", { stdio: "ignore" });
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 // ─── Git commit hook ─────────────────────────────────────────────────────────
@@ -517,40 +499,6 @@ export default function (pi: ExtensionAPI) {
 				].join(" | "),
 				"info",
 			);
-		},
-	});
-
-	// ── Register /agent-mentions command (manual check via daemon) ────────
-	pi.registerCommand("agent-mentions", {
-		description: "Request an immediate mention check from the daemon",
-		handler: async (_args, ctx) => {
-			if (!agentName) {
-				ctx.ui.notify("No agent identity assigned.", "warning");
-				return;
-			}
-
-			if (connState === "connected" && socket?.writable) {
-				socket.write(
-					JSON.stringify({ type: "poll_now" }) + "\n",
-				);
-				ctx.ui.notify(
-					"Requested immediate mention check from daemon.",
-					"info",
-				);
-			} else {
-				// Daemon not connected — try a direct check as fallback
-				if (!ghAvailable()) {
-					ctx.ui.notify(
-						"Daemon not connected and gh CLI not available for fallback.",
-						"error",
-					);
-					return;
-				}
-				ctx.ui.notify(
-					"Daemon not connected. Run /agent-status for details.",
-					"warning",
-				);
-			}
 		},
 	});
 
