@@ -357,10 +357,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── Inject identity into system prompt ────────────────────────────────
+	// Guard against duplicate injection (extension may be loaded twice).
 	pi.on("before_agent_start", async (event, _ctx) => {
 		if (!agentName) return;
-		const identityBlock = buildIdentityPrompt(agentName);
 		const currentPrompt = event.systemPrompt ?? "";
+		// Idempotency: skip if identity block already present
+		if (currentPrompt.includes("<agent_identity>")) return;
+		const identityBlock = buildIdentityPrompt(agentName);
 		return {
 			systemPrompt: currentPrompt + "\n" + identityBlock,
 		};
@@ -380,6 +383,14 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		if (lastIntercomIdx === -1) return;
+
+		// Idempotency: if directive already injected right before, skip
+		if (lastIntercomIdx > 0) {
+			const prev = msgs[lastIntercomIdx - 1] as any;
+			if (prev?.content?.[0]?.text?.includes("DO NOT reply in normal chat")) {
+				return;
+			}
+		}
 
 		// Check if this intercom message has already been replied to via intercom
 		let alreadyReplied = false;
