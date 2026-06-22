@@ -359,8 +359,11 @@ export default function (pi: ExtensionAPI) {
 	// ── Inject identity into system prompt ────────────────────────────────
 	pi.on("before_agent_start", async (event, _ctx) => {
 		if (!agentName) return;
-		const identityBlock = buildIdentityPrompt(agentName);
 		const currentPrompt = event.systemPrompt ?? "";
+		// Guard against duplicate extension loads (e.g. stale copy in
+		// ~/.pi/agent/extensions/ plus pipackage install in settings.json)
+		if (currentPrompt.includes("<agent_identity>")) return;
+		const identityBlock = buildIdentityPrompt(agentName);
 		return {
 			systemPrompt: currentPrompt + "\n" + identityBlock,
 		};
