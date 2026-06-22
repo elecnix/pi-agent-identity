@@ -291,6 +291,16 @@ function removeBySocket(sock: net.Socket): void {
 
 // ─── Session revival ───────────────────────────────────────────────────────
 
+function isProcessAlive(pid: number): boolean {
+  if (pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resumeSession(reg: Registration, mention: Record<string, unknown>): void {
   if (!reg.sessionFile || !fs.existsSync(reg.sessionFile)) {
     log(`Cannot resume ${reg.agentName}: session file not found`);
@@ -384,6 +394,29 @@ function startServer(): net.Server {
                 repo: r.repo,
               }));
               safeWrite(sock, JSON.stringify({ type: "agent_list", agents }) + "\n");
+              break;
+            }
+
+            case "lookup_agent": {
+              if (!msg.agentName) {
+                safeWrite(sock, JSON.stringify({ type: "error", message: "lookup_agent requires agentName" }) + "\n");
+                break;
+              }
+              const reg = registry.get(msg.agentName);
+              if (!reg) {
+                safeWrite(sock, JSON.stringify({ type: "agent_not_found", agentName: msg.agentName }) + "\n");
+                break;
+              }
+              const active = reg.connected || isProcessAlive(reg.pid);
+              safeWrite(sock, JSON.stringify({
+                type: "agent_found",
+                name: reg.agentName,
+                sessionFile: reg.sessionFile,
+                connected: reg.connected,
+                pid: reg.pid,
+                active,
+                repo: reg.repo,
+              }) + "\n");
               break;
             }
 
