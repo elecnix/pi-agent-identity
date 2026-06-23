@@ -19,6 +19,7 @@ import { createConnection, Socket } from "node:net";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { queryDaemonForSession, isDaemonRunning } from "./daemon-client.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -103,9 +104,6 @@ Strictly follow these identity rules:
 
 // ─── Daemon helpers ──────────────────────────────────────────────────────────
 
-function isDaemonRunning(): boolean {
-	return existsSync(SOCKET_PATH);
-}
 
 function spawnDaemon(): boolean {
 	try {
@@ -511,5 +509,33 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("Reconnecting to daemon...", "info");
 			connectToDaemon();
 		},
+	});
+
+	// ── Register /session command ────────────────────────────────────────
+	pi.registerCommand("session", {
+		description: "Switch to another agent's session by name",
+		handler: async (args, ctx) => {
+			const targetName = args.trim();
+			if (!targetName) {
+				ctx.ui.notify("Usage: /session <agent-name>", "warning");
+				return;
+			}
+
+			ctx.ui.notify(`Looking up agent "${targetName}"...`, "info");
+
+			const sessionPath = await queryDaemonForSession(targetName);
+			if (!sessionPath) {
+				ctx.ui.notify(`Agent "${targetName}" not found.", "error");
+				return;
+			}
+
+			await ctx.switchSession(sessionPath);
+		},
+	});
+
+	// ── Register --agent-name flag ───────────────────────────────────────
+	pi.registerFlag("agent-name", {
+		description: "Resolve session by agent name via the agent-identity daemon",
+		type: "string",
 	});
 }
