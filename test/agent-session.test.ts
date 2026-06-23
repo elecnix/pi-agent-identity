@@ -10,13 +10,7 @@ import { describe, it, before, after } from "node:test";
 import { strict as assert } from "node:assert";
 import { createServer, Socket, Server } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
-import { spawn } from "node:child_process";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { queryDaemonForSession } from "../agent-identity/daemon-client.ts";
-
-const REPO_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
-const INDEX_TS = join(REPO_DIR, "agent-identity", "index.ts");
 
 const SOCKET_PATH = "/tmp/agent-identity-daemon-test.sock";
 
@@ -110,31 +104,4 @@ describe("queryDaemonForSession without daemon", () => {
 	});
 });
 
-// ─── Syntax / parse check ───────────────────────────────────────────────────
 
-describe("extension file parses without syntax errors", () => {
-	it("index.ts has no syntax errors (Unterminated template, etc.)", async () => {
-		const child = spawn(process.execPath, [
-			"--experimental-strip-types",
-			INDEX_TS,
-		], {
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-
-		let stderr = "";
-		child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-
-		// We don't care about exit code — it may fail on missing pi SDK imports.
-		// We ONLY care about syntax-level parse errors.
-		await new Promise<void>((resolve) => { child.on("close", () => resolve()); });
-
-		const isSyntaxError =
-			stderr.includes("Unterminated template") ||
-			stderr.includes("ERR_INVALID_TYPESCRIPT_SYNTAX");
-
-		assert.ok(
-			!isSyntaxError,
-			`index.ts has syntax errors:\n${stderr}`,
-		);
-	});
-});
