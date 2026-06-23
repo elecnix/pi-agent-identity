@@ -205,7 +205,43 @@ function connectToDaemon(): void {
 						continue;
 					}
 
-					// Old daemon that doesn't understand version_check
+					// Daemon sent version_mismatch. If daemon expected > ours,
+					// it's newer — accept it instead of downgrading.
+					if (
+					msg.type === "version_mismatch" &&
+					typeof msg.expected === "number" &&
+					msg.expected > PROTOCOL_VERSION
+				) {
+						// Daemon is newer — register without restarting
+					versionOk = true;
+					setConnState("connected");
+					reconnectDelay = 1000;
+					let repo: string | undefined;
+					try {
+						const remote = execSync("git remote get-url origin", {
+							encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000,
+						}).trim();
+						const m = remote.match(/github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/);
+						if (m) repo = m[1] + "/" + m[2];
+					} catch {}
+					sock.write(
+						JSON.stringify({
+							type: "register",
+							agentName,
+							sessionFile,
+							pid: process.pid,
+							repo,
+						}) + "\n",
+					);
+					pingTimer = setInterval(() => {
+						if (sock.writable) {
+							sock.write(JSON.stringify({ type: "ping" }) + "\n");
+						}
+					}, 30_000);
+					continue;
+				}
+
+				// Old daemon that doesn't understand version_check
 					// responds with error, or mismatch response.
 					// Kill it and respawn the current version.
 					if (
