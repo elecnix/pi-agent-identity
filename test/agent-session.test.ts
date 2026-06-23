@@ -110,20 +110,6 @@ describe("queryDaemonForSession without daemon", () => {
 	});
 });
 
-describe("/session command arg parsing", () => {
-	it("empty string should be rejected", () => {
-		assert.equal("".trim(), "");
-	});
-
-	it("valid agent name is accepted", () => {
-		assert.equal("test-fox-42".trim(), "test-fox-42");
-	});
-
-	it("whitespace-only is rejected", () => {
-		assert.equal("   ".trim(), "");
-	});
-});
-
 // ─── Syntax / parse check ───────────────────────────────────────────────────
 
 describe("extension file parses without syntax errors", () => {
