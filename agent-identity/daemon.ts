@@ -22,6 +22,9 @@ import { join } from "node:path";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
+/** Protocol version — bump when message format changes. Extension checks this on connect. */
+const PROTOCOL_VERSION = 1;
+
 const PID_FILE = "/tmp/agent-identity-daemon.pid";
 const SOCK_FILE = "/tmp/agent-identity-daemon.sock";
 const LOG_FILE = "/tmp/agent-identity-daemon.log";
@@ -453,6 +456,16 @@ function startServer(): net.Server {
                   commentId: Date.now(),
                 });
                 safeWrite(sock, JSON.stringify({ type: "mention_queued", targetName, method: "revival" }) + "\n");
+              }
+              break;
+            }
+
+            case "version_check": {
+              const clientVersion = msg.version as number | undefined;
+              if (clientVersion === PROTOCOL_VERSION) {
+                safeWrite(sock, JSON.stringify({ type: "version_ok", version: PROTOCOL_VERSION }) + "\n");
+              } else {
+                safeWrite(sock, JSON.stringify({ type: "version_mismatch", expected: PROTOCOL_VERSION, received: clientVersion }) + "\n");
               }
               break;
             }
