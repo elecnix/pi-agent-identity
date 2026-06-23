@@ -16,7 +16,7 @@ import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { execSync, spawn } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { createConnection, Socket } from "node:net";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { queryDaemonForSession, isDaemonRunning } from "./daemon-client.ts";
@@ -50,6 +50,9 @@ function generateName(): string {
 }
 
 // ─── Daemon connection state ────────────────────────────────────────────────
+
+/** Protocol version — must match daemon.ts. On mismatch, daemon is auto-restarted. */
+const PROTOCOL_VERSION = 1;
 
 const SOCKET_PATH = "/tmp/agent-identity-daemon.sock";
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
@@ -138,43 +141,20 @@ function connectToDaemon(): void {
 			scheduleReconnect();
 			return;
 		}
+		// Give daemon a moment to start listening
+		// (spawnDaemon is fire-and-forget, need to wait for socket)
 	}
 
 	const sock = createConnection(SOCKET_PATH);
 
 	let buffer = "";
+	let versionOk = false;
 
 	sock.on("connect", () => {
-		setConnState("connected");
-		reconnectDelay = 1000; // reset backoff
-
-		// Detect repo from git remote for daemon registration
-		let repo: string | undefined;
-		try {
-			const remote = execSync("git remote get-url origin", {
-				encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000,
-			}).trim();
-			const m = remote.match(/github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/);
-			if (m) repo = m[1] + "/" + m[2];
-		} catch {}
-
-		// Register
+		// Phase 1: version check
 		sock.write(
-			JSON.stringify({
-				type: "register",
-				agentName,
-				sessionFile,
-				pid: process.pid,
-				repo,
-			}) + "\n",
+			JSON.stringify({ type: "version_check", version: PROTOCOL_VERSION }) + "\n",
 		);
-
-		// Start pings
-		pingTimer = setInterval(() => {
-			if (sock.writable) {
-				sock.write(JSON.stringify({ type: "ping" }) + "\n");
-			}
-		}, 30_000);
 	});
 
 	sock.on("data", (data: Buffer) => {
@@ -185,7 +165,119 @@ function connectToDaemon(): void {
 		for (const line of lines) {
 			if (!line.trim()) continue;
 			try {
-				const msg = JSON.parse(line);
+				const msg = JSON.parse(line) as Record<string, unknown>;
+
+				// ── Version check phase ──────────────────────────────────
+				if (!versionOk) {
+					if (msg.type === "version_ok") {
+						versionOk = true;
+						setConnState("connected");
+						reconnectDelay = 1000;
+
+						// Phase 2: register
+						let repo: string | undefined;
+						try {
+							const remote = execSync("git remote get-url origin", {
+								encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000,
+							}).trim();
+							const m = remote.match(/github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/);
+							if (m) repo = m[1] + "/" + m[2];
+						} catch {}
+
+						sock.write(
+							JSON.stringify({
+								type: "register",
+								agentName,
+								sessionFile,
+								pid: process.pid,
+								repo,
+							}) + "\n",
+						);
+
+						// Start pings
+						pingTimer = setInterval(() => {
+							if (sock.writable) {
+								sock.write(JSON.stringify({ type: "ping" }) + "\n");
+							}
+						}, 30_000);
+						continue;
+					}
+
+					// Daemon sent version_mismatch. If daemon expected > ours,
+					// it's newer — accept it instead of downgrading.
+					if (
+					msg.type === "version_mismatch" &&
+					typeof msg.expected === "number" &&
+					msg.expected > PROTOCOL_VERSION
+				) {
+						// Daemon is newer — register without restarting
+					versionOk = true;
+					setConnState("connected");
+					reconnectDelay = 1000;
+					let repo: string | undefined;
+					try {
+						const remote = execSync("git remote get-url origin", {
+							encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000,
+						}).trim();
+						const m = remote.match(/github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/);
+						if (m) repo = m[1] + "/" + m[2];
+					} catch {}
+					sock.write(
+						JSON.stringify({
+							type: "register",
+							agentName,
+							sessionFile,
+							pid: process.pid,
+							repo,
+						}) + "\n",
+					);
+					pingTimer = setInterval(() => {
+						if (sock.writable) {
+							sock.write(JSON.stringify({ type: "ping" }) + "\n");
+						}
+					}, 30_000);
+					continue;
+				}
+
+				// Old daemon that doesn't understand version_check
+					// responds with error, or mismatch response.
+					// Kill it and respawn the current version.
+					if (
+						msg.type === "version_mismatch" ||
+						(msg.type === "error" && typeof msg.message === "string" &&
+							msg.message.includes("version_check"))
+					) {
+						setConnState("disconnected");
+						cleanupSocket();
+						// Kill stale daemon
+						try {
+							const pidRaw = readFileSync("/tmp/agent-identity-daemon.pid", "utf-8").trim();
+							const pid = parseInt(pidRaw, 10);
+							if (!isNaN(pid)) process.kill(pid, "SIGTERM");
+						} catch {}
+						// Wait briefly for socket cleanup, then reconnect
+						setTimeout(() => {
+							connectToDaemon();
+						}, 500);
+						return;
+					}
+
+					// Any other message before version_ok is unexpected —
+					// treat as stale daemon.
+					setConnState("disconnected");
+					cleanupSocket();
+					try {
+						const pidRaw = readFileSync("/tmp/agent-identity-daemon.pid", "utf-8").trim();
+						const pid = parseInt(pidRaw, 10);
+						if (!isNaN(pid)) process.kill(pid, "SIGTERM");
+					} catch {}
+					setTimeout(() => {
+						connectToDaemon();
+					}, 500);
+					return;
+				}
+
+				// ── Normal message handling ───────────────────────────────
 				handleDaemonMessage(msg);
 			} catch {
 				// ignore parse errors
