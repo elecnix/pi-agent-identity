@@ -19,6 +19,7 @@ import { createConnection, Socket } from "node:net";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { queryDaemonForSession, isDaemonRunning } from "./daemon-client.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -103,67 +104,6 @@ Strictly follow these identity rules:
 
 // ─── Daemon helpers ──────────────────────────────────────────────────────────
 
-/**
- * Query the daemon for an agent's session file path.
- * Connects, sends lookup_agent, returns sessionFile or null.
- */
-async function queryDaemonForSession(agentName: string): Promise<string | null> {
-	if (!isDaemonRunning()) return null;
-
-	return new Promise((resolve) => {
-		const sock = createConnection(SOCKET_PATH);
-		let buffer = "";
-
-		const timeout = setTimeout(() => {
-			try { sock.destroy(); } catch {}
-			resolve(null);
-		}, 2000);
-
-		sock.on("connect", () => {
-			sock.write(`${JSON.stringify({ type: "lookup_agent", agentName })}\n`);
-		});
-
-		sock.on("data", (data: Buffer) => {
-			buffer += data.toString();
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const msg = JSON.parse(line) as Record<string, unknown>;
-					if (msg.type === "agent_found" && msg.sessionFile) {
-						clearTimeout(timeout);
-						try { sock.destroy(); } catch {}
-						resolve(msg.sessionFile as string);
-						return;
-					}
-					if (msg.type === "agent_not_found") {
-						clearTimeout(timeout);
-						try { sock.destroy(); } catch {}
-						resolve(null);
-						return;
-					}
-				} catch { /* ignore parse errors */ }
-			}
-		});
-
-		sock.on("error", () => {
-			clearTimeout(timeout);
-			try { sock.destroy(); } catch {}
-			resolve(null);
-		});
-
-		sock.on("close", () => {
-			clearTimeout(timeout);
-			resolve(null);
-		});
-	});
-}
-
-function isDaemonRunning(): boolean {
-	return existsSync(SOCKET_PATH);
-}
 
 function spawnDaemon(): boolean {
 	try {

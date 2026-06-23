@@ -1,16 +1,16 @@
 /**
- * Tests for --agent-name flag, /session command, and queryDaemonForSession.
+ * Tests for queryDaemonForSession from daemon-client.ts.
  *
- * Tests the daemon protocol directly since the extension runs inside pi.
- * Uses Node's built-in test runner (node --test).
+ * Tests the ACTUAL production code, not a replica.
  *
  * Run: node --experimental-strip-types --test test/agent-session.test.ts
  */
 
 import { describe, it, before, after } from "node:test";
 import { strict as assert } from "node:assert";
-import { createServer, createConnection, Socket, Server } from "node:net";
+import { createServer, Socket, Server } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
+import { queryDaemonForSession } from "../agent-identity/daemon-client.ts";
 
 const SOCKET_PATH = "/tmp/agent-identity-daemon-test.sock";
 
@@ -75,62 +75,6 @@ function stopMockDaemon(): Promise<void> {
 	});
 }
 
-// ─── queryDaemonForSession replica (same logic as index.ts) ──────────────
-
-async function queryDaemonForSession(agentName: string): Promise<string | null> {
-	if (!existsSync(SOCKET_PATH)) return null;
-
-	return new Promise((resolve) => {
-		const sock = createConnection(SOCKET_PATH);
-		let buffer = "";
-
-		const timeout = setTimeout(() => {
-			try { sock.destroy(); } catch {}
-			resolve(null);
-		}, 2000);
-
-		sock.on("connect", () => {
-			sock.write(`${JSON.stringify({ type: "lookup_agent", agentName })}\n`);
-		});
-
-		sock.on("data", (data: Buffer) => {
-			buffer += data.toString();
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const msg = JSON.parse(line) as Record<string, unknown>;
-					if (msg.type === "agent_found" && msg.sessionFile) {
-						clearTimeout(timeout);
-						try { sock.destroy(); } catch {}
-						resolve(msg.sessionFile as string);
-						return;
-					}
-					if (msg.type === "agent_not_found") {
-						clearTimeout(timeout);
-						try { sock.destroy(); } catch {}
-						resolve(null);
-						return;
-					}
-				} catch {}
-			}
-		});
-
-		sock.on("error", () => {
-			clearTimeout(timeout);
-			try { sock.destroy(); } catch {}
-			resolve(null);
-		});
-
-		sock.on("close", () => {
-			clearTimeout(timeout);
-			resolve(null);
-		});
-	});
-}
-
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
 describe("queryDaemonForSession", () => {
@@ -138,44 +82,38 @@ describe("queryDaemonForSession", () => {
 	after(stopMockDaemon);
 
 	it("resolves known agent name to session file", async () => {
-		const result = await queryDaemonForSession("test-fox-42");
+		const result = await queryDaemonForSession("test-fox-42", SOCKET_PATH);
 		assert.equal(result, "/tmp/test-session.jsonl");
 	});
 
 	it("returns null for unknown agent name", async () => {
-		const result = await queryDaemonForSession("nonexistent-99");
+		const result = await queryDaemonForSession("nonexistent-99", SOCKET_PATH);
 		assert.equal(result, null);
 	});
 
 	it("returns null for empty agent name", async () => {
-		const result = await queryDaemonForSession("");
+		const result = await queryDaemonForSession("", SOCKET_PATH);
 		assert.equal(result, null);
 	});
 });
 
 describe("queryDaemonForSession without daemon", () => {
-	// Daemon already stopped by after() from previous describe
-
 	it("returns null when daemon is not running", async () => {
-		const result = await queryDaemonForSession("test-fox-42");
+		const result = await queryDaemonForSession("test-fox-42", SOCKET_PATH);
 		assert.equal(result, null);
 	});
 });
 
 describe("/session command arg parsing", () => {
 	it("empty string should be rejected", () => {
-		const args = "";
-		assert.equal(args.trim(), "");
-		assert.equal(args.trim() === "", true);
+		assert.equal("".trim(), "");
 	});
 
 	it("valid agent name is accepted", () => {
-		const args = "test-fox-42";
-		assert.equal(args.trim(), "test-fox-42");
+		assert.equal("test-fox-42".trim(), "test-fox-42");
 	});
 
 	it("whitespace-only is rejected", () => {
-		const args = "   ";
-		assert.equal(args.trim(), "");
+		assert.equal("   ".trim(), "");
 	});
 });
