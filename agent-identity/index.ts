@@ -525,7 +525,7 @@ export default function (pi: ExtensionAPI) {
 
 			const sessionPath = await queryDaemonForSession(targetName);
 			if (!sessionPath) {
-				ctx.ui.notify(`Agent "${targetName}" not found.", "error");
+				ctx.ui.notify(`Agent "${targetName}" not found.`, "error");
 				return;
 			}
 
