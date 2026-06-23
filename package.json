@@ -2,6 +2,10 @@
   "name": "pi-agent-identity",
   "version": "1.0.0",
   "description": "Persistent AI agent identities with cross-session collaboration via GitHub PR mentions and session revival",
+  "type": "module",
+  "scripts": {
+    "postinstall": "node patch-pi.mjs"
+  },
   "pi": {
     "extensions": ["./agent-identity/index.ts"]
   }
