@@ -19,7 +19,7 @@ pi install git:github.com/elecnix/pi-agent-identity
 2. Sessions register with a **detached singleton daemon** via Unix socket
 3. The daemon maintains **ghost intercom sessions** for disconnected agents so they remain reachable
 4. **Disconnected sessions are revived**: the daemon spawns `pi --session <file> -p "message"` when an intercom message arrives for an offline agent
-5. **Agent lookup**: The daemon exposes a `lookup_agent` message so pi core can resolve agent names to session files, enabling `--session <name>`
+5. **Agent lookup**: The daemon exposes a `lookup_agent` message so pi core can resolve agent names to session files, enabling `--session <name>` (requires pi >= next release after PR [earendil-works/pi#5987](https://github.com/earendil-works/pi/pull/5987))
 
 ## Daemon protocol
 
