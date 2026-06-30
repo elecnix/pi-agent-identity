@@ -13,7 +13,7 @@
 
 import type { ExtensionAPI, BashToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { execSync, spawn } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { createConnection, Socket } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
@@ -434,13 +434,14 @@ export default function (pi: ExtensionAPI) {
 		const flagValue = pi.getFlag("agent-name");
 		const targetSession = await resolveTargetSession(flagValue, agentName);
 		if (targetSession) {
-			// Spawn a new pi process pointed at the target session, then exit.
-			// This mirrors the daemon's resumeSession behaviour.
-			spawn(
+			// Replace the current process with pi pointing at the target session.
+			// spawnSync with stdio: "inherit" gives the child full terminal
+			// control while the parent blocks. When the child exits, we follow.
+			spawnSync(
 				process.env["PI_CMD"] ?? "pi",
 				["--session", targetSession],
-				{ detached: true, stdio: "ignore", env: { ...process.env } },
-			).unref();
+				{ stdio: "inherit", env: { ...process.env } },
+			);
 			process.exit(0);
 		}
 
@@ -625,6 +626,33 @@ export default function (pi: ExtensionAPI) {
 			reconnectDelay = 1000;
 			ctx.ui.notify("Reconnecting to daemon...", "info");
 			connectToDaemon();
+		},
+	});
+
+	// ── Register /resume-agent command ──────────────────────────────────
+	pi.registerCommand("resume-agent", {
+		description: "Switch to another agent's session by name",
+		handler: async (args, ctx) => {
+			const targetName = args.trim();
+			if (!targetName) {
+				ctx.ui.notify("Usage: /resume-agent <agent-name>", "warning");
+				return;
+			}
+
+			if (targetName === agentName) {
+				ctx.ui.notify(`Already running as ${agentName}`, "info");
+				return;
+			}
+
+			ctx.ui.notify(`Looking up agent "${targetName}"...`, "info");
+
+			const sessionPath = await resolveTargetSession(targetName, agentName);
+			if (!sessionPath) {
+				ctx.ui.notify(`Agent "${targetName}" not found in daemon`, "error");
+				return;
+			}
+
+			await ctx.switchSession(sessionPath);
 		},
 	});
 
