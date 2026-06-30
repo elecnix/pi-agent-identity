@@ -10,7 +10,7 @@ import { describe, it, before, after } from "node:test";
 import { strict as assert } from "node:assert";
 import { createServer, Socket, Server } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
-import { queryDaemonForSession } from "../agent-identity/daemon-client.ts";
+import { queryDaemonForSession, resolveTargetSession } from "../agent-identity/daemon-client.ts";
 
 const SOCKET_PATH = "/tmp/agent-identity-daemon-test.sock";
 
@@ -100,6 +100,36 @@ describe("queryDaemonForSession", () => {
 describe("queryDaemonForSession without daemon", () => {
 	it("returns null when daemon is not running", async () => {
 		const result = await queryDaemonForSession("test-fox-42", SOCKET_PATH);
+		assert.equal(result, null);
+	});
+});
+
+describe("resolveTargetSession", () => {
+	before(startMockDaemon);
+	after(stopMockDaemon);
+
+	it("returns null when flag is undefined", async () => {
+		const result = await resolveTargetSession(undefined, "polar-lemur-69", SOCKET_PATH);
+		assert.equal(result, null);
+	});
+
+	it("returns null when flag is not a string (boolean)", async () => {
+		const result = await resolveTargetSession(true, "polar-lemur-69", SOCKET_PATH);
+		assert.equal(result, null);
+	});
+
+	it("returns null when flag matches current agent name", async () => {
+		const result = await resolveTargetSession("solar-falcon-55", "solar-falcon-55", SOCKET_PATH);
+		assert.equal(result, null);
+	});
+
+	it("resolves session file when flag differs and agent exists in daemon", async () => {
+		const result = await resolveTargetSession("test-fox-42", "polar-lemur-69", SOCKET_PATH);
+		assert.equal(result, "/tmp/test-session.jsonl");
+	});
+
+	it("returns null when flag differs but agent not found in daemon", async () => {
+		const result = await resolveTargetSession("nonexistent-99", "polar-lemur-69", SOCKET_PATH);
 		assert.equal(result, null);
 	});
 });
