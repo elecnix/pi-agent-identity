@@ -47,6 +47,18 @@ function startMockDaemon(): Promise<void> {
 									active: true,
 									repo: "test/repo",
 								}) + "\n");
+							} else if (msg.agentName === "stale-badger-1") {
+								// Returns a path that does not exist on disk — simulates
+								// a stale daemon entry whose session file was deleted.
+								sock.write(JSON.stringify({
+									type: "agent_found",
+									name: "stale-badger-1",
+									sessionFile: "/tmp/does-not-exist.jsonl",
+									connected: false,
+									pid: 0,
+									active: false,
+									repo: null,
+								}) + "\n");
 							} else {
 								sock.write(JSON.stringify({
 									type: "agent_not_found",
@@ -98,6 +110,11 @@ describe("queryDaemonForSession", () => {
 
 	it("returns null for empty agent name", async () => {
 		const result = await queryDaemonForSession("", SOCKET_PATH);
+		assert.equal(result, null);
+	});
+
+	it("returns null when daemon returns a path to a non-existent file (stale entry)", async () => {
+		const result = await queryDaemonForSession("stale-badger-1", SOCKET_PATH);
 		assert.equal(result, null);
 	});
 });
