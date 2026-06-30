@@ -141,11 +141,32 @@ function connectToDaemon(): void {
 			scheduleReconnect();
 			return;
 		}
-		// Give daemon a moment to start listening
-		// (spawnDaemon is fire-and-forget, need to wait for socket)
+		// Daemon was just spawned — give it time to bind, then retry.
+		// Poll every 100ms for up to 3s until the socket file appears.
+		// Without this wait, createConnection races the daemon bind and
+		// the connection attempt either errors or succeeds silently with
+		// no listener — in both cases the handshake hangs forever.
+		let attempts = 0;
+		const poll = () => {
+			if (isDaemonRunning()) {
+				// Socket exists — proceed with connection (reset state so
+				// the "connecting" guard doesn't block re-entry).
+				connState = "disconnected";
+				connectToDaemon();
+			} else if (++attempts < 30) {
+				setTimeout(poll, 100);
+			} else {
+				setConnState("disconnected");
+				socket = null;
+				scheduleReconnect();
+			}
+		};
+		poll();
+		return;
 	}
 
 	const sock = createConnection(SOCKET_PATH);
+	let handshakeTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	let buffer = "";
 	let versionOk = false;
@@ -170,6 +191,7 @@ function connectToDaemon(): void {
 				// ── Version check phase ──────────────────────────────────
 				if (!versionOk) {
 					if (msg.type === "version_ok") {
+						if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
 						versionOk = true;
 						setConnState("connected");
 						reconnectDelay = 1000;
@@ -211,6 +233,7 @@ function connectToDaemon(): void {
 					msg.expected > PROTOCOL_VERSION
 				) {
 						// Daemon is newer — register without restarting
+					if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
 					versionOk = true;
 					setConnState("connected");
 					reconnectDelay = 1000;
@@ -286,16 +309,30 @@ function connectToDaemon(): void {
 	});
 
 	sock.on("close", () => {
+		if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
 		setConnState("disconnected");
 		cleanupSocket();
 		scheduleReconnect();
 	});
 
 	sock.on("error", () => {
+		if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
 		setConnState("disconnected");
 		cleanupSocket();
 		scheduleReconnect();
 	});
+
+	// If the handshake doesn't complete within 5s, treat the connection as
+	// dead. This recovers from stale sockets where createConnection succeeds
+	// but the peer never responds (e.g. daemon crashed between bind and
+	// accept, or the socket fd is orphaned).
+	handshakeTimeout = setTimeout(() => {
+		if (!versionOk && socket) {
+			setConnState("disconnected");
+			cleanupSocket();
+			scheduleReconnect();
+		}
+	}, 5000);
 
 	socket = sock;
 }
