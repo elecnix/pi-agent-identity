@@ -64,7 +64,11 @@ export async function queryDaemonForSession(
 					if (msg.type === "agent_found" && msg.sessionFile) {
 						clearTimeout(timeout);
 						try { sock.destroy(); } catch {}
-						resolve(msg.sessionFile as string);
+						// Validate the session file still exists on disk.
+						// Daemon entries can go stale when sessions are pruned
+						// or the registry path drifts from the filesystem.
+						const path = msg.sessionFile as string;
+						resolve(existsSync(path) ? path : null);
 						return;
 					}
 					if (msg.type === "agent_not_found") {
