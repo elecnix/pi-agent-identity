@@ -19,7 +19,7 @@ import { createConnection, Socket } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isDaemonRunning } from "./daemon-client.ts";
+import { isDaemonRunning, resolveTargetSession } from "./daemon-client.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -429,6 +429,20 @@ export default function (pi: ExtensionAPI) {
 
 		// Capture session file path
 		sessionFile = ctx.sessionManager.getSessionFile();
+
+		// ── Handle --agent-name flag: resolve and revive target session ──
+		const flagValue = pi.getFlag("agent-name");
+		const targetSession = await resolveTargetSession(flagValue, agentName);
+		if (targetSession) {
+			// Spawn a new pi process pointed at the target session, then exit.
+			// This mirrors the daemon's resumeSession behaviour.
+			spawn(
+				process.env["PI_CMD"] ?? "pi",
+				["--session", targetSession],
+				{ detached: true, stdio: "ignore", env: { ...process.env } },
+			).unref();
+			process.exit(0);
+		}
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`Agent identity: ${agentName}`, "info");

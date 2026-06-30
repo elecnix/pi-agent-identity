@@ -14,6 +14,22 @@ export function isDaemonRunning(socketPath: string = DEFAULT_SOCKET_PATH): boole
 }
 
 /**
+ * Resolve a --agent-name CLI flag value to a session file path.
+ *
+ * Returns null when the flag is unset, not a string, matches the current
+ * agent name, or the target agent isn't registered in the daemon.
+ */
+export async function resolveTargetSession(
+	flagValue: string | boolean | undefined,
+	currentAgentName: string,
+	socketPath: string = DEFAULT_SOCKET_PATH,
+): Promise<string | null> {
+	if (!flagValue || typeof flagValue !== "string") return null;
+	if (flagValue === currentAgentName) return null;
+	return await queryDaemonForSession(flagValue, socketPath);
+}
+
+/**
  * Query the daemon for an agent's session file path.
  * Connects, sends lookup_agent, returns sessionFile or null.
  */
