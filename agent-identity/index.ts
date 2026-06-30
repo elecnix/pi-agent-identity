@@ -13,7 +13,7 @@
 
 import type { ExtensionAPI, BashToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { execSync, spawn } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { createConnection, Socket } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
@@ -432,16 +432,35 @@ export default function (pi: ExtensionAPI) {
 
 		// ── Handle --agent-name flag: resolve and revive target session ──
 		const flagValue = pi.getFlag("agent-name");
-		const targetSession = await resolveTargetSession(flagValue, agentName);
-		if (targetSession) {
-			// Spawn a new pi process pointed at the target session, then exit.
-			// This mirrors the daemon's resumeSession behaviour.
-			spawn(
-				process.env["PI_CMD"] ?? "pi",
-				["--session", targetSession],
-				{ detached: true, stdio: "ignore", env: { ...process.env } },
-			).unref();
-			process.exit(0);
+		if (flagValue && typeof flagValue === "string" && flagValue !== agentName) {
+			const targetSession = await resolveTargetSession(flagValue, agentName);
+			if (!targetSession) {
+				// Agent not found in daemon — warn but continue with new session
+				if (ctx.hasUI) {
+					ctx.ui.notify(`Agent "${flagValue}" not found in daemon`, "warning");
+				}
+			} else {
+				// Replace the current process with pi pointed at the target
+				// session.  spawnSync with stdio: "inherit" blocks the parent
+				// while the child owns the terminal.  When the child exits, we
+				// follow with the same exit code.
+				const result = spawnSync(
+					process.env["PI_CMD"] ?? "pi",
+					["--session", targetSession],
+					{ stdio: "inherit", env: { ...process.env } },
+				);
+				if (result.error) {
+					// Failed to spawn — fall through to normal startup
+					if (ctx.hasUI) {
+						ctx.ui.notify(
+							`Failed to launch pi: ${result.error.message}`,
+							"error",
+						);
+					}
+				} else {
+					process.exit(result.status ?? (result.signal ? 1 : 0));
+				}
+			}
 		}
 
 		if (ctx.hasUI) {
@@ -625,6 +644,33 @@ export default function (pi: ExtensionAPI) {
 			reconnectDelay = 1000;
 			ctx.ui.notify("Reconnecting to daemon...", "info");
 			connectToDaemon();
+		},
+	});
+
+	// ── Register /resume-agent command ──────────────────────────────────
+	pi.registerCommand("resume-agent", {
+		description: "Switch to another agent's session by name",
+		handler: async (args, ctx) => {
+			const targetName = args.trim();
+			if (!targetName) {
+				ctx.ui.notify("Usage: /resume-agent <agent-name>", "warning");
+				return;
+			}
+
+			if (targetName === agentName) {
+				ctx.ui.notify(`Already running as ${agentName}`, "info");
+				return;
+			}
+
+			ctx.ui.notify(`Looking up agent "${targetName}"...`, "info");
+
+			const sessionPath = await resolveTargetSession(targetName, agentName);
+			if (!sessionPath) {
+				ctx.ui.notify(`Agent "${targetName}" not found in daemon`, "error");
+				return;
+			}
+
+			await ctx.switchSession(sessionPath);
 		},
 	});
 
