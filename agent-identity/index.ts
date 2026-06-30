@@ -432,17 +432,35 @@ export default function (pi: ExtensionAPI) {
 
 		// ── Handle --agent-name flag: resolve and revive target session ──
 		const flagValue = pi.getFlag("agent-name");
-		const targetSession = await resolveTargetSession(flagValue, agentName);
-		if (targetSession) {
-			// Replace the current process with pi pointing at the target session.
-			// spawnSync with stdio: "inherit" gives the child full terminal
-			// control while the parent blocks. When the child exits, we follow.
-			spawnSync(
-				process.env["PI_CMD"] ?? "pi",
-				["--session", targetSession],
-				{ stdio: "inherit", env: { ...process.env } },
-			);
-			process.exit(0);
+		if (flagValue && typeof flagValue === "string" && flagValue !== agentName) {
+			const targetSession = await resolveTargetSession(flagValue, agentName);
+			if (!targetSession) {
+				// Agent not found in daemon — warn but continue with new session
+				if (ctx.hasUI) {
+					ctx.ui.notify(`Agent "${flagValue}" not found in daemon`, "warning");
+				}
+			} else {
+				// Replace the current process with pi pointed at the target
+				// session.  spawnSync with stdio: "inherit" blocks the parent
+				// while the child owns the terminal.  When the child exits, we
+				// follow with the same exit code.
+				const result = spawnSync(
+					process.env["PI_CMD"] ?? "pi",
+					["--session", targetSession],
+					{ stdio: "inherit", env: { ...process.env } },
+				);
+				if (result.error) {
+					// Failed to spawn — fall through to normal startup
+					if (ctx.hasUI) {
+						ctx.ui.notify(
+							`Failed to launch pi: ${result.error.message}`,
+							"error",
+						);
+					}
+				} else {
+					process.exit(result.status ?? (result.signal ? 1 : 0));
+				}
+			}
 		}
 
 		if (ctx.hasUI) {
