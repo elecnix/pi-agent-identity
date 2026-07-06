@@ -428,6 +428,9 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Restore or generate agent name ────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
+		// Reset shutdown flag — /new reuses the same extension module
+		shuttingDown = false;
+
 		// Restore from existing session entries
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (
