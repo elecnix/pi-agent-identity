@@ -9,8 +9,14 @@
 import { describe, it, before, after } from "node:test";
 import { strict as assert } from "node:assert";
 import { createServer, Socket, Server } from "node:net";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
-import { queryDaemonForSession, resolveTargetSession } from "../agent-identity/daemon-client.ts";
+import { existsSync, unlinkSync, writeFileSync, mkdirSync, rmSync, mkdtempSync, utimesSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	queryDaemonForSession,
+	resolveTargetSession,
+	findSessionByAgentName,
+} from "../agent-identity/daemon-client.ts";
 
 const SOCKET_PATH = "/tmp/agent-identity-daemon-test.sock";
 const TEST_SESSION_FILE = "/tmp/agent-identity-daemon-test-session.jsonl";
@@ -156,4 +162,109 @@ describe("resolveTargetSession", () => {
 	});
 });
 
+// ─── Filesystem fallback ─────────────────────────────────────────────────────
 
+/**
+ * Build a fake pi sessions tree with jsonl files that embed an
+ * `agent-identity-name` custom entry, mirroring the real session format.
+ */
+function nameEntry(name: string): string {
+	return JSON.stringify({
+		type: "custom",
+		customType: "agent-identity-name",
+		data: { name },
+	});
+}
+
+function writeSession(dir: string, sub: string, file: string, lines: string[]): string {
+	const full = join(dir, sub);
+	mkdirSync(full, { recursive: true });
+	const path = join(full, file);
+	writeFileSync(path, lines.join("\n") + "\n");
+	return path;
+}
+
+describe("findSessionByAgentName", () => {
+	let sessionsDir: string;
+
+	before(() => {
+		sessionsDir = mkdtempSync(join(tmpdir(), "pi-sessions-"));
+		// A couple of unrelated sessions
+		writeSession(sessionsDir, "--repo-a--", "a.jsonl", [
+			'{"type":"message"}',
+			nameEntry("other-otter-1"),
+		]);
+		// The target agent lives here
+		writeSession(sessionsDir, "--repo-b--", "b.jsonl", [
+			'{"type":"message"}',
+			'{"type":"custom","customType":"noise","data":{}}',
+			nameEntry("shadow-lemur-3"),
+		]);
+	});
+
+	after(() => {
+		try { rmSync(sessionsDir, { recursive: true, force: true }); } catch {}
+	});
+
+	it("finds a session file by its embedded agent name", () => {
+		const result = findSessionByAgentName("shadow-lemur-3", sessionsDir);
+		assert.equal(result, join(sessionsDir, "--repo-b--", "b.jsonl"));
+	});
+
+	it("returns null when no session carries that name", () => {
+		const result = findSessionByAgentName("ghost-who-never-was-0", sessionsDir);
+		assert.equal(result, null);
+	});
+
+	it("returns null for an empty agent name", () => {
+		const result = findSessionByAgentName("", sessionsDir);
+		assert.equal(result, null);
+	});
+
+	it("returns null when the sessions dir does not exist", () => {
+		const result = findSessionByAgentName("shadow-lemur-3", join(sessionsDir, "nope"));
+		assert.equal(result, null);
+	});
+
+	it("returns the most recent session when a name was reused", () => {
+		const older = writeSession(sessionsDir, "--repo-c--", "old.jsonl", [nameEntry("reused-raven-9")]);
+		const newer = writeSession(sessionsDir, "--repo-c--", "new.jsonl", [nameEntry("reused-raven-9")]);
+		// Force the intended ordering regardless of write speed.
+		const past = new Date(Date.now() - 60_000);
+		const now = new Date();
+		utimesSync(older, past, past);
+		utimesSync(newer, now, now);
+		const result = findSessionByAgentName("reused-raven-9", sessionsDir);
+		assert.equal(result, newer);
+	});
+});
+
+describe("resolveTargetSession filesystem fallback", () => {
+	let sessionsDir: string;
+
+	before(async () => {
+		await startMockDaemon();
+		sessionsDir = mkdtempSync(join(tmpdir(), "pi-sessions-fb-"));
+		writeSession(sessionsDir, "--repo-x--", "x.jsonl", [nameEntry("offline-owl-7")]);
+	});
+
+	after(async () => {
+		await stopMockDaemon();
+		try { rmSync(sessionsDir, { recursive: true, force: true }); } catch {}
+	});
+
+	it("falls back to the filesystem when the daemon has no record", async () => {
+		// The mock daemon replies agent_not_found for this name.
+		const result = await resolveTargetSession(
+			"offline-owl-7", "polar-lemur-69", SOCKET_PATH, sessionsDir,
+		);
+		assert.equal(result, join(sessionsDir, "--repo-x--", "x.jsonl"));
+	});
+
+	it("returns null when neither daemon nor filesystem knows the agent", async () => {
+		const result = await resolveTargetSession(
+			"nowhere-newt-0", "polar-lemur-69", SOCKET_PATH, sessionsDir,
+		);
+		assert.equal(result, null);
+	});
+});

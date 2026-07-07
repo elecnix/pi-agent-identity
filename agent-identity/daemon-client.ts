@@ -5,9 +5,25 @@
  */
 
 import { createConnection } from "node:net";
-import { existsSync } from "node:fs";
+import {
+	existsSync,
+	openSync,
+	readSync,
+	closeSync,
+	readdirSync,
+	statSync,
+} from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 const DEFAULT_SOCKET_PATH = "/tmp/agent-identity-daemon.sock";
+
+/**
+ * Where pi stores its session files: ~/.pi/agent/sessions/<cwd>/<ts>_<uuid>.jsonl
+ * Overridable via PI_SESSIONS_DIR for tests / non-standard installs.
+ */
+const DEFAULT_SESSIONS_DIR =
+	process.env["PI_SESSIONS_DIR"] ?? join(homedir(), ".pi", "agent", "sessions");
 
 export function isDaemonRunning(socketPath: string = DEFAULT_SOCKET_PATH): boolean {
 	return existsSync(socketPath);
@@ -16,17 +32,119 @@ export function isDaemonRunning(socketPath: string = DEFAULT_SOCKET_PATH): boole
 /**
  * Resolve a --agent-name CLI flag value to a session file path.
  *
- * Returns null when the flag is unset, not a string, matches the current
- * agent name, or the target agent isn't registered in the daemon.
+ * Returns null when the flag is unset, not a string, or matches the current
+ * agent name. Otherwise asks the daemon first (fast path for live/known
+ * agents) and, if the daemon has no record, falls back to scanning the
+ * on-disk session files — the durable source of truth — so an agent can be
+ * revived even after a reboot wiped the daemon's /tmp registry.
  */
 export async function resolveTargetSession(
 	flagValue: string | boolean | undefined,
 	currentAgentName: string,
 	socketPath: string = DEFAULT_SOCKET_PATH,
+	sessionsDir: string = DEFAULT_SESSIONS_DIR,
 ): Promise<string | null> {
 	if (!flagValue || typeof flagValue !== "string") return null;
 	if (flagValue === currentAgentName) return null;
-	return await queryDaemonForSession(flagValue, socketPath);
+	const fromDaemon = await queryDaemonForSession(flagValue, socketPath);
+	if (fromDaemon) return fromDaemon;
+	return findSessionByAgentName(flagValue, sessionsDir);
+}
+
+/**
+ * Scan pi session files for the one whose embedded identity matches
+ * `agentName`, returning the path of the most recently modified match (or
+ * null). Each session records its identity as an early custom entry:
+ *   {"type":"custom","customType":"agent-identity-name","data":{"name":"..."}}
+ * The entry is written at session_start, so it lives in the file's head — we
+ * only read the first chunk of each file rather than the whole thing.
+ */
+export function findSessionByAgentName(
+	agentName: string,
+	sessionsDir: string = DEFAULT_SESSIONS_DIR,
+): string | null {
+	if (!agentName) return null;
+	if (!existsSync(sessionsDir)) return null;
+
+	let best: { path: string; mtimeMs: number } | null = null;
+	for (const path of listSessionFiles(sessionsDir)) {
+		if (!sessionHeadHasName(path, agentName)) continue;
+		let mtimeMs: number;
+		try {
+			mtimeMs = statSync(path).mtimeMs;
+		} catch {
+			continue;
+		}
+		if (!best || mtimeMs > best.mtimeMs) best = { path, mtimeMs };
+	}
+	return best?.path ?? null;
+}
+
+/** Recursively collect *.jsonl paths under a directory. */
+function listSessionFiles(dir: string): string[] {
+	const out: string[] = [];
+	let entries: import("node:fs").Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return out;
+	}
+	for (const entry of entries) {
+		const full = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			out.push(...listSessionFiles(full));
+		} else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+			out.push(full);
+		}
+	}
+	return out;
+}
+
+/** Read the head of a session file and look for the identity entry. */
+function sessionHeadHasName(path: string, agentName: string): boolean {
+	const head = readHead(path, 65536);
+	if (!head) return false;
+	// Cheap reject before parsing — the marker must be present at all.
+	if (!head.includes("agent-identity-name")) return false;
+
+	const lines = head.split("\n");
+	// Drop a possibly-truncated final line from the bounded read.
+	lines.pop();
+	for (const line of lines) {
+		if (!line.includes("agent-identity-name")) continue;
+		try {
+			const msg = JSON.parse(line) as Record<string, unknown>;
+			if (
+				msg.type === "custom" &&
+				msg.customType === "agent-identity-name" &&
+				(msg.data as Record<string, unknown> | undefined)?.name === agentName
+			) {
+				return true;
+			}
+		} catch {
+			/* ignore malformed lines */
+		}
+	}
+	return false;
+}
+
+/** Read up to `maxBytes` from the start of a file as UTF-8, or "" on error. */
+function readHead(path: string, maxBytes: number): string {
+	let fd: number;
+	try {
+		fd = openSync(path, "r");
+	} catch {
+		return "";
+	}
+	try {
+		const buf = Buffer.alloc(maxBytes);
+		const n = readSync(fd, buf, 0, maxBytes, 0);
+		return buf.toString("utf-8", 0, n);
+	} catch {
+		return "";
+	} finally {
+		closeSync(fd);
+	}
 }
 
 /**
