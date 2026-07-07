@@ -476,9 +476,10 @@ export default function (pi: ExtensionAPI) {
 		if (flagValue && typeof flagValue === "string" && flagValue !== agentName) {
 			const targetSession = await resolveTargetSession(flagValue, agentName);
 			if (!targetSession) {
-				// Agent not found in daemon — warn but continue with new session
+				// Not in the daemon and no matching session file on disk —
+				// warn but continue with a fresh session.
 				if (ctx.hasUI) {
-					ctx.ui.notify(`Agent "${flagValue}" not found in daemon`, "warning");
+					ctx.ui.notify(`No session found for agent "${flagValue}"`, "warning");
 				}
 			} else {
 				// Replace the current process with pi pointed at the target
@@ -707,7 +708,7 @@ export default function (pi: ExtensionAPI) {
 
 			const sessionPath = await resolveTargetSession(targetName, agentName);
 			if (!sessionPath) {
-				ctx.ui.notify(`Agent "${targetName}" not found in daemon`, "error");
+				ctx.ui.notify(`No session found for agent "${targetName}"`, "error");
 				return;
 			}
 
