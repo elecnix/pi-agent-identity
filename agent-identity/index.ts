@@ -99,7 +99,7 @@ Strictly follow these identity rules:
 
 6. **Code exclusion**: NEVER include your agent name "${name}" in source code, configuration files, or any file content. Your identity belongs ONLY in version-control metadata (commit trailers, PR descriptions, issue comments).
 
-7. **Intercom messages**: When you receive a 📨 message from another agent via intercom, you MUST respond through the intercom tool — NOT in the normal chat. Use \`intercom({ action: "reply", message: "..." })\`. If it's an ask, the sender is blocked waiting — reply promptly. Treat other agents as peer collaborators: engage naturally, ask questions, share findings.
+7. **Intercom messages**: When you receive a 📨 message from another agent via intercom, respond using \`intercom({ action: "reply", message: "..." })\` only if you have something meaningful to contribute — a question, a decision, a finding, or help they explicitly asked for. NEVER reply just to acknowledge receipt, say thanks, or exchange pleasantries; there is no need to "close the loop." If the sender used \`ask\`, they are blocked waiting — reply promptly even if only to unblock them with a brief answer. If the message is a fire-and-forget \`send\` and you have nothing substantive to add, simply continue working without replying.
 
 8. **Session name**: Your session is named "${name}" — use /name to see it.
 </agent_identity>`;
@@ -568,10 +568,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (alreadyReplied) return;
 
-		// Inject a forceful instruction before the intercom message
+		// Inject a gentle reminder before the intercom message
 		const directive = {
 			role: "user" as const,
-			content: [{ type: "text" as const, text: "⚠️ You just received an intercom message from another agent. DO NOT reply in normal chat. You MUST respond using the intercom tool: intercom({ action: \"reply\", message: \"...\" }). Replying in chat means the sender will never see your response." }],
+			content: [{ type: "text" as const, text: "📨 Intercom message above. Respond with intercom({ action: \"reply\", message: \"...\" }) only if you have something meaningful to say. If the sender used ask they are blocked — reply promptly. Otherwise, if there is nothing to add, just continue working without replying." }],
 		};
 
 		// Insert right before the intercom message
