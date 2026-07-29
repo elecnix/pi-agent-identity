@@ -13,6 +13,8 @@
 
 import type { ExtensionAPI, BashToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { composeSessionName, SESSION_RENAME_TOOL_DESCRIPTION } from "./session-name.ts";
 import { execSync, spawn, spawnSync } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { createConnection, Socket } from "node:net";
@@ -641,6 +643,52 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("agent-identity", undefined);
 
 		piRef = null;
+	});
+
+	// ── Register session_rename tool ───────────────────────────────────
+	// The agent renames its own session to reflect the task, keeping the
+	// agent name as the prefix. Registered unconditionally (not inside
+	// session_start) so the tool is available on the very first turn.
+	pi.registerTool({
+		name: "session_rename",
+		label: "Rename Session",
+		description: SESSION_RENAME_TOOL_DESCRIPTION,
+		promptSnippet:
+			"Rename the current pi session; call it AS SOON AS the first user message conveys intent, before doing substantive work.",
+		promptGuidelines: [
+			"Call session_rename immediately after reading the user's first message — before any other tool use — so the session name reflects the task early.",
+		],
+		parameters: Type.Object({
+			session_name: Type.String({
+				description:
+					"A short, kebab-case description of the task (e.g. 'fix-auth-bug', 'PRI-123-add-router-config'). The agent-name prefix is added automatically — provide the description only.",
+			}),
+		}),
+		async execute(_toolCallId, params) {
+			const desired = params.session_name ?? "";
+			// Compose the full name: <agentName>: <description>.
+			const fullName = composeSessionName(agentName, desired);
+
+			try {
+				pi.setSessionName(fullName);
+			} catch (err) {
+				return {
+					content: [{
+						type: "text" as const,
+						text: `Failed to rename session: ${err instanceof Error ? err.message : String(err)}`,
+					}],
+					details: { ok: false, agentName, desired, fullName },
+				};
+			}
+
+			return {
+				content: [{
+					type: "text" as const,
+					text: `Session renamed to: ${fullName}`,
+				}],
+				details: { ok: true, agentName, desired, fullName },
+			};
+		},
 	});
 
 	// ── Register /whoami command ──────────────────────────────────────────

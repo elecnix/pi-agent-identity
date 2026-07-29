@@ -35,3 +35,10 @@ pi install git:github.com/elecnix/pi-agent-identity
 | `/whoami` | Show your agent identity |
 | `/agent-status` | Daemon connection status |
 | `/agent-reconnect` | Force reconnect to daemon |
+| `/resume-agent` | Switch to another agent's session by name |
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| `session_rename` | Let the agent rename its own session to reflect the task. The agent name stays as the prefix (`keen-gar-77: fix-auth-bug`). The description instructs the LLM to call it immediately on the first user message that conveys intent. |
