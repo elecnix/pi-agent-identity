@@ -3,8 +3,8 @@
  *
  * Gives each pi session a unique random name so agents can @mention each other
  * on GitHub PRs and Linear tickets. When an agent sees an @mention of its own
- * name, it injects that mention into the session so the LLM can respond.
- *
+ * name, it injects that mention into the session as informational situation
+ * awareness (no response expected unless the sender asked a direct question).
  * Names are persisted across session reloads via pi.appendEntry().
  * Polling is handled by a detached singleton daemon (agent-identity-daemon).
  * The extension connects to the daemon via Unix socket to register and receive
@@ -22,6 +22,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDaemonRunning, resolveTargetSession } from "./daemon-client.ts";
+import { formatMentionNotification } from "./mention-notification.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -97,7 +98,7 @@ Strictly follow these identity rules:
 
 4. **@mentioning other agents**: You can @mention other agents by their lowercase-kebab name in GitHub PR comments and Linear issue comments. They will detect your mention and respond.
 
-5. **Responding to @mentions**: When you see that @${name} has been mentioned (the system will inject these notifications), respond as yourself, addressing whoever mentioned you by their agent name.
+5. **Responding to @mentions**: When you see that @${name} has been mentioned (the system will inject these notifications), treat it as **informational situation awareness**. No response is expected. Continue your current work. Only respond if the sender explicitly asked you a direct question, or you have substantive new information they need; otherwise do not reply just to acknowledge, thank, or close the loop.
 
 6. **Code exclusion**: NEVER include your agent name "${name}" in source code, configuration files, or any file content. Your identity belongs ONLY in version-control metadata (commit trailers, PR descriptions, issue comments).
 
@@ -350,19 +351,9 @@ function handleDaemonMessage(msg: Record<string, unknown>): void {
 		if (commentId !== undefined && seenMentionIds.has(commentId)) return;
 		if (commentId !== undefined) seenMentionIds.add(commentId);
 
-		const prLabel = prNumber ? `PR #${prNumber}` : "a PR/issue";
-
 		try {
 			piRef.sendUserMessage(
-				[
-					`🔔 @${from} mentioned you (@${agentName}) in ${prLabel}:`,
-					"",
-					`> ${body.slice(0, 800)}`,
-					"",
-					url,
-					"",
-					`Respond to this mention naturally. Identify yourself as ${agentName} and reply to @${from}.`,
-				].join("\n"),
+				formatMentionNotification({ from, agentName, body, url, prNumber }),
 			);
 		} catch {
 			// Agent busy — daemon will retry later
