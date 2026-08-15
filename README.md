@@ -1,5 +1,8 @@
 # pi-agent-identity
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/elecnix/pi-agent-identity)
+
+
 Gives each pi session a unique persistent identity so AI agents can collaborate across sessions via intercom.
 
 ## Architecture
