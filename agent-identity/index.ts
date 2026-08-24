@@ -25,6 +25,11 @@ import { fileURLToPath } from "node:url";
 import { isDaemonRunning, resolveTargetSession } from "./daemon-client.ts";
 import { formatMentionNotification } from "./mention-notification.ts";
 import { buildRelayReport, type RelayOutcome } from "./delivery-report.ts";
+import {
+	IDENTITY_CHANNEL_NAMESPACE,
+	resolveIntercomTarget,
+	type RosterSession,
+} from "./intercom-addressing.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -86,6 +91,28 @@ const pendingRelays = new Map<
 	string,
 	{ resolve: (outcome: RelayOutcome) => void; timer: ReturnType<typeof setTimeout> }
 >();
+
+/**
+ * pi-intercom ≥ 0.12 extension-bus channel (minimal local shape).
+ * Mirrored as string literals + loose types so this extension keeps no hard
+ * runtime dependency on the pi-intercom package.
+ */
+const INTERCOM_EXTENSION_REGISTER_EVENT = "intercom:extension-register";
+
+interface IntercomIdentityChannel {
+	snapshot(): { connected: boolean; supported: boolean };
+	listSessions(): Promise<RosterSession[]>;
+	publish(payload: unknown, options?: unknown): void;
+}
+
+let identityChannel: IntercomIdentityChannel | null = null;
+
+function announceIdentity(): void {
+	if (!identityChannel || !agentName) return;
+	try {
+		identityChannel.publish({ agentName });
+	} catch {}
+}
 
 function setConnState(state: ConnState) {
 	connState = state;
@@ -523,6 +550,22 @@ export default function (pi: ExtensionAPI) {
 
 		// Connect to daemon (updates status on success/failure)
 		connectToDaemon();
+
+		// ── Register intercom identity via the extension bus ────────────
+		// Publishes the immutable agentName on pi-intercom's silent extension
+		// bus and gives this session a live-roster handle for address
+		// resolution. Older pi-intercom versions ignore unknown events.
+		try {
+			pi.events.emit(INTERCOM_EXTENSION_REGISTER_EVENT, {
+				namespace: IDENTITY_CHANNEL_NAMESPACE,
+				ownerEligible: true,
+				onReady: (channel: IntercomIdentityChannel) => {
+					identityChannel = channel;
+					announceIdentity();
+				},
+				onEvent: (_event: unknown) => {},
+			});
+		} catch {}
 	});
 
 	// ── Inject identity into system prompt ────────────────────────────────
@@ -648,6 +691,38 @@ export default function (pi: ExtensionAPI) {
 		checkBashForGitCommit(event);
 	});
 
+	// ── Intercom addressing via the immutable agent identity ──────────────
+	// pi-intercom resolves `to` by exact registered name only; after
+	// session_rename composes `<agent>: <task>` a peer addressing the bare
+	// agent identity gets "Session not found". Rewrite bare identities to
+	// their unique composite roster name before the send reaches the broker.
+	pi.on("tool_call", async (event) => {
+		if (event.toolName !== "intercom") return;
+		if (!identityChannel) return;
+		const input = event.input as Record<string, unknown>;
+		const action = input.action;
+		if (action !== "send" && action !== "ask") return;
+		const to = input.to;
+		if (typeof to !== "string" || !to.trim()) return;
+		let snap: { connected?: boolean; supported?: boolean } | undefined;
+		try {
+			snap = identityChannel.snapshot();
+		} catch {
+			return;
+		}
+		if (!snap?.connected || !snap.supported) return;
+		try {
+			const sessions = await identityChannel.listSessions();
+			const resolved = resolveIntercomTarget(to, sessions);
+			if (resolved.status === "rewritten" && resolved.name) {
+				input.to = resolved.name;
+			}
+		} catch {
+			// Roster unavailable — leave the address untouched; the relay hook
+			// handles any resulting delivery failure honestly.
+		}
+	});
+
 	// ── Cleanup on shutdown ───────────────────────────────────────────────
 	pi.on("session_shutdown", async (_event, ctx) => {
 		// Persist seen mentions
@@ -702,6 +777,10 @@ export default function (pi: ExtensionAPI) {
 					details: { ok: false, agentName, desired, fullName },
 				};
 			}
+
+			// Re-announce the immutable identity on the extension bus — the
+			// roster name changed, so peers should re-resolve addresses.
+			announceIdentity();
 
 			return {
 				content: [{
