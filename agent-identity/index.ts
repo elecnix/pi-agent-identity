@@ -24,6 +24,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDaemonRunning, resolveTargetSession } from "./daemon-client.ts";
 import { formatMentionNotification } from "./mention-notification.ts";
+import { buildRelayReport, type RelayOutcome } from "./delivery-report.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -73,6 +74,18 @@ let sessionFile: string | null = null;
 let piRef: ExtensionAPI | null = null;
 let updateStatus: ((state: ConnState) => void) | null = null;
 let shuttingDown = false;
+
+/**
+ * Pending daemon-relay requests keyed by target name. The tool_result hook
+ * writes queue_mention and waits for the daemon's mention_queued verdict so
+ * the reported outcome reflects what actually happened (live delivery,
+ * revival, deferred, or unresolved) instead of a fabricated "offline" story.
+ */
+const RELAY_VERDICT_TIMEOUT_MS = 3000;
+const pendingRelays = new Map<
+	string,
+	{ resolve: (outcome: RelayOutcome) => void; timer: ReturnType<typeof setTimeout> }
+>();
 
 function setConnState(state: ConnState) {
 	connState = state;
@@ -286,6 +299,7 @@ function connectToDaemon(): void {
 		if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
 		setConnState("disconnected");
 		cleanupSocket();
+		failPendingRelays();
 		scheduleReconnect();
 	});
 
@@ -293,6 +307,7 @@ function connectToDaemon(): void {
 		if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
 		setConnState("disconnected");
 		cleanupSocket();
+		failPendingRelays();
 		scheduleReconnect();
 	});
 
@@ -312,6 +327,22 @@ function connectToDaemon(): void {
 }
 
 function handleDaemonMessage(msg: Record<string, unknown>): void {
+	if (msg.type === "mention_queued") {
+		const targetName = typeof msg.targetName === "string" ? msg.targetName : "";
+		const pending = targetName ? pendingRelays.get(targetName) : undefined;
+		if (pending) {
+			pendingRelays.delete(targetName);
+			clearTimeout(pending.timer);
+			const method = msg.method;
+			pending.resolve(
+				method === "live" || method === "revival" || method === "deferred"
+					? method
+					: "unresolved",
+			);
+		}
+		return;
+	}
+
 	if (msg.type === "mention" && piRef && agentName) {
 		const from = (msg.from as string) ?? "unknown";
 		const body = (msg.body as string) ?? "";
@@ -340,6 +371,15 @@ function cleanupSocket(): void {
 	if (socket) {
 		try { socket.destroy(); } catch {}
 		socket = null;
+	}
+}
+
+/** Settle every pending relay as unresolved (daemon connection lost). */
+function failPendingRelays(): void {
+	for (const [name, pending] of pendingRelays) {
+		clearTimeout(pending.timer);
+		pending.resolve("unresolved");
+		pendingRelays.delete(name);
 	}
 }
 
@@ -545,7 +585,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── Intercom failure → daemon relay ──────────────────────────────────
-	// When intercom send/ask fails (session not found), route via daemon.
+	// When intercom send/ask fails, route via daemon and report honestly.
 	// Disconnected agents already appear in the intercom broker's session list
 	// via ghost registration (daemon.ts), so no separate augmentation is needed.
 	pi.on("tool_result", async (event) => {
@@ -563,19 +603,39 @@ export default function (pi: ExtensionAPI) {
 				if (!targetName || !messageBody) return;
 				if (!agentName || !socket?.writable) return;
 
-				socket.write(JSON.stringify({
-					type: "queue_mention",
-					targetName,
-					fromName: agentName,
-					body: messageBody,
-				}) + "\n");
+				// Ask the daemon to deliver/relay, then wait for its verdict so
+				// the wording matches reality (live / revival / deferred /
+				// unresolved) instead of always claiming an offline peer.
+				const outcome = await new Promise<RelayOutcome>((resolve) => {
+					const timer = setTimeout(() => {
+						pendingRelays.delete(targetName);
+						resolve("unresolved");
+					}, RELAY_VERDICT_TIMEOUT_MS);
+					pendingRelays.set(targetName, { resolve, timer });
+					try {
+						socket!.write(JSON.stringify({
+							type: "queue_mention",
+							targetName,
+							fromName: agentName,
+							body: messageBody,
+						}) + "\n");
+					} catch {
+						pendingRelays.delete(targetName);
+						clearTimeout(timer);
+						resolve("unresolved");
+					}
+				});
 
 				return {
 					content: [{
 						type: "text",
-						text: `⚠️ ${targetName} is offline. Message relayed via daemon — they'll be revived and respond shortly.`,
+						text: buildRelayReport(targetName, outcome),
 					}],
-					details: { ...d, relayed: true, relayMethod: "daemon-revival" },
+					details: {
+						...d,
+						relayed: outcome === "live" || outcome === "revival",
+						relayMethod: outcome,
+					},
 				};
 			}
 		}

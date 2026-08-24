@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { resolveAgentAddress } from "./session-addressing.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -405,7 +406,10 @@ function startServer(): net.Server {
                 safeWrite(sock, JSON.stringify({ type: "error", message: "lookup_agent requires agentName" }) + "\n");
                 break;
               }
-              const reg = registry.get(msg.agentName);
+              // Tolerant lookup: exact name first, then a composite
+              // `<name>: <suffix>` match so a bare agent name still resolves
+              // after session_rename.
+              const reg = resolveAgentAddress(msg.agentName, Array.from(registry.values()));
               if (!reg) {
                 safeWrite(sock, JSON.stringify({ type: "agent_not_found", agentName: msg.agentName }) + "\n");
                 break;
@@ -432,27 +436,39 @@ function startServer(): net.Server {
                 safeWrite(sock, JSON.stringify({ type: "error", message: "queue_mention requires targetName, fromName, body" }) + "\n");
                 break;
               }
-              const target = registry.get(targetName);
+              // Tolerant resolution: exact registry hit first, then a
+              // composite `<name>: <suffix>` match (session_rename renames
+              // sessions to that form while peers address the bare name).
+              const target = resolveAgentAddress(targetName, Array.from(registry.values()));
               if (!target) {
-                safeWrite(sock, JSON.stringify({ type: "error", message: `Agent ${targetName} not registered` }) + "\n");
+                // Name-resolution miss — report it honestly instead of
+                // letting the caller claim an offline/revived peer.
+                log(`queue_mention: no roster entry matches "${targetName}"`);
+                safeWrite(sock, JSON.stringify({ type: "mention_queued", targetName, method: "unresolved" }) + "\n");
                 break;
               }
               if (target.connected) {
-                // Still connected — deliver live
+                // Still connected — deliver live (the intercom failure was
+                // likely just a composite-name miss, not an offline peer).
                 safeWrite(target.socket!, JSON.stringify({
                   type: "mention", from: fromName, prNumber: 0,
                   body: `📨 Intercom from ${fromName}: ${body.slice(0, 800)}`,
-                  url: "", repo: target.repo ?? "", agentName: targetName,
+                  url: "", repo: target.repo ?? "", agentName: target.agentName,
                   commentId: Date.now(),
                 }) + "\n");
                 safeWrite(sock, JSON.stringify({ type: "mention_queued", targetName, method: "live" }) + "\n");
+              } else if (isProcessAlive(target.pid)) {
+                // Process alive but unreachable via socket — do NOT spawn a
+                // second detached pi on the same session file (two writers).
+                log(`Not reviving ${targetName}: process ${target.pid} is alive but not connected`);
+                safeWrite(sock, JSON.stringify({ type: "mention_queued", targetName, method: "deferred" }) + "\n");
               } else {
-                // Disconnected — revive directly
-                log(`Reviving ${targetName} for intercom message from ${fromName}`);
+                // Disconnected and dead — revive
+                log(`Reviving ${target.agentName} for intercom message from ${fromName}`);
                 resumeSession(target, {
                   from: fromName, prNumber: 0,
                   body: `📨 Intercom message from @${fromName}:\n\n${body.slice(0, 800)}\n\nReply using intercom({ action: "reply", message: "..." }).`,
-                  url: "", repo: target.repo ?? "", agentName: targetName,
+                  url: "", repo: target.repo ?? "", agentName: target.agentName,
                   commentId: Date.now(),
                 });
                 safeWrite(sock, JSON.stringify({ type: "mention_queued", targetName, method: "revival" }) + "\n");
