@@ -31,6 +31,7 @@ import {
 	type RosterSession,
 } from "./intercom-addressing.ts";
 import { pickFreshAgentName } from "./name-minting.ts";
+import { formatAgentMatches, searchAgents, type AgentSearchEntry } from "./agent-search.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -748,6 +749,75 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("agent-identity", undefined);
 
 		piRef = null;
+	});
+
+	// ── Register agent_search tool ─────────────────────────────────────
+	// Address a peer knowing only a short name fragment — far cheaper than
+	// listing hundreds of intercom sessions into the transcript.
+	pi.registerTool({
+		name: "agent_search",
+		label: "Search Agents",
+		description:
+			"Search registered agents by (partial) name. Returns matching agent names, their full registered intercom names when renamed, and online/offline status. Use this instead of intercom list when you only know a short name fragment.",
+		promptSnippet:
+			"Find an agent's addressable name from a short fragment without dumping the full session roster.",
+		promptGuidelines: [
+			"Before sending intercom messages to an unfamiliar or ambiguous name, use agent_search to resolve the exact address.",
+		],
+		parameters: Type.Object({
+			query: Type.String({
+				description:
+					"A full or partial agent name, e.g. 'cosmic' or 'keen-gar-77'. Exact matches rank first.",
+			}),
+			limit: Type.Optional(
+				Type.Number({
+					description: "Maximum number of matches to return (default 10).",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params) {
+			const query = typeof params.query === "string" ? params.query : "";
+			if (!query.trim()) {
+				return {
+					content: [{ type: "text", text: "No query provided." }],
+					details: { ok: false, query },
+				};
+			}
+
+			// Gather candidates from the daemon registry and the live roster.
+			const byName = new Map<string, AgentSearchEntry>();
+			try {
+				for (const agent of await listDaemonAgents()) {
+					byName.set(agent.name, { name: agent.name, connected: agent.connected });
+				}
+			} catch {}
+			if (identityChannel) {
+				try {
+					const snap = identityChannel.snapshot();
+					if (snap.connected && snap.supported) {
+						for (const session of await identityChannel.listSessions()) {
+							const rosterName = typeof session.name === "string" ? session.name.trim() : "";
+							if (!rosterName) continue;
+							const bare = rosterName.split(": ")[0]!;
+							const existing = byName.get(bare);
+							byName.set(bare, {
+								name: bare,
+								rosterName,
+								connected: existing?.connected ?? true,
+							});
+						}
+					}
+				} catch {}
+			}
+
+			const limit = typeof params.limit === "number" && params.limit > 0 ? Math.floor(params.limit) : 10;
+			const hits = searchAgents(query, Array.from(byName.values()), limit);
+
+			return {
+				content: [{ type: "text", text: formatAgentMatches(query, hits) }],
+				details: { ok: true, query, count: hits.length, hits },
+			};
+		},
 	});
 
 	// ── Register session_rename tool ───────────────────────────────────

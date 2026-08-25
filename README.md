@@ -46,6 +46,7 @@ pi install git:github.com/elecnix/pi-agent-identity
 | Tool | Description |
 |------|-------------|
 | `session_rename` | Let the agent rename its own session to reflect the task. The agent name stays as the prefix (`keen-gar-77: fix-auth-bug`). The description instructs the LLM to call it immediately on the first user message that conveys intent. |
+| `agent_search` | Search registered agents by (partial) name — exact matches rank first, then prefix matches — returning full registered intercom names and online/offline status. Resolves addresses from a short fragment without dumping hundreds of roster entries into the transcript. |
 
 ## Name minting
 
