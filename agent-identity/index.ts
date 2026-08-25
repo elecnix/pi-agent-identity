@@ -22,7 +22,7 @@ import { createConnection, Socket } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isDaemonRunning, resolveTargetSession } from "./daemon-client.ts";
+import { isDaemonRunning, listDaemonAgents, resolveTargetSession } from "./daemon-client.ts";
 import { formatMentionNotification } from "./mention-notification.ts";
 import { buildRelayReport, type RelayOutcome } from "./delivery-report.ts";
 import {
@@ -30,6 +30,7 @@ import {
 	resolveIntercomTarget,
 	type RosterSession,
 } from "./intercom-addressing.ts";
+import { pickFreshAgentName } from "./name-minting.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -491,7 +492,14 @@ export default function (pi: ExtensionAPI) {
 			if (envName) {
 				agentName = envName;
 			} else {
-				agentName = generateName();
+				// Collision-free mint (#34): a name still in the daemon roster
+				// belongs to a disconnected-but-revivable agent whose ghost
+				// intercom session would swallow this session's messages.
+				const takenNames = new Set<string>();
+				try {
+					for (const agent of await listDaemonAgents()) takenNames.add(agent.name);
+				} catch {}
+				agentName = pickFreshAgentName(generateName, takenNames);
 			}
 			pi.appendEntry("agent-identity-name", { name: agentName });
 		}
