@@ -46,3 +46,7 @@ pi install git:github.com/elecnix/pi-agent-identity
 | Tool | Description |
 |------|-------------|
 | `session_rename` | Let the agent rename its own session to reflect the task. The agent name stays as the prefix (`keen-gar-77: fix-auth-bug`). The description instructs the LLM to call it immediately on the first user message that conveys intent. |
+
+## Name minting
+
+Fresh names are drawn collision-free: before adopting a minted name, the extension queries the daemon's registry (`list_agents`) and re-rolls (up to 10 draws) if the name still belongs to a disconnected-but-revivable agent. This prevents a same-name remint from leaving messages stranded in a ghost intercom session (#34).

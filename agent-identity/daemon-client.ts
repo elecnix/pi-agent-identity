@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { parseAgentListResponse } from "./name-minting.ts";
 
 const DEFAULT_SOCKET_PATH = "/tmp/agent-identity-daemon.sock";
 
@@ -145,6 +146,60 @@ function readHead(path: string, maxBytes: number): string {
 	} finally {
 		closeSync(fd);
 	}
+}
+
+/**
+ * Query the daemon for its full agent registry.
+ * Returns `{ name, connected }[]`, or [] when the daemon is unreachable.
+ */
+export async function listDaemonAgents(
+	socketPath: string = DEFAULT_SOCKET_PATH,
+): Promise<Array<{ name: string; connected: boolean }>> {
+	if (!isDaemonRunning(socketPath)) return [];
+
+	return new Promise((resolve) => {
+		const sock = createConnection(socketPath);
+		let buffer = "";
+
+		const timeout = setTimeout(() => {
+			try { sock.destroy(); } catch {}
+			resolve([]);
+		}, 2000);
+
+		sock.on("connect", () => {
+			sock.write(`${JSON.stringify({ type: "list_agents" })}\n`);
+		});
+
+		sock.on("data", (data: Buffer) => {
+			buffer += data.toString();
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				try {
+					const msg = JSON.parse(line) as Record<string, unknown>;
+					if (msg.type === "agent_list") {
+						clearTimeout(timeout);
+						try { sock.destroy(); } catch {}
+						resolve(parseAgentListResponse(msg));
+						return;
+					}
+				} catch { /* ignore parse errors */ }
+			}
+		});
+
+		sock.on("error", () => {
+			clearTimeout(timeout);
+			try { sock.destroy(); } catch {}
+			resolve([]);
+		});
+
+		sock.on("close", () => {
+			clearTimeout(timeout);
+			resolve([]);
+		});
+	});
 }
 
 /**
