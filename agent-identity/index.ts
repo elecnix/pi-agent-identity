@@ -230,6 +230,7 @@ function connectToDaemon(): void {
 								sessionFile,
 								pid: process.pid,
 								repo,
+								cwd: process.cwd(),
 							}) + "\n",
 						);
 
@@ -269,6 +270,7 @@ function connectToDaemon(): void {
 							sessionFile,
 							pid: process.pid,
 							repo,
+							cwd: process.cwd(),
 						}) + "\n",
 					);
 					pingTimer = setInterval(() => {
@@ -809,7 +811,11 @@ export default function (pi: ExtensionAPI) {
 			const byName = new Map<string, AgentSearchEntry>();
 			try {
 				for (const agent of await listDaemonAgents()) {
-					byName.set(agent.name, { name: agent.name, connected: agent.connected });
+					byName.set(agent.name, {
+						name: agent.name,
+						connected: agent.connected,
+						...(agent.ghostSessionId ? { ghostSessionId: agent.ghostSessionId } : {}),
+					});
 				}
 			} catch {}
 			if (identityChannel) {
@@ -825,6 +831,7 @@ export default function (pi: ExtensionAPI) {
 								name: bare,
 								rosterName,
 								connected: existing?.connected ?? true,
+								ghostSessionId: existing?.ghostSessionId,
 							});
 						}
 					}

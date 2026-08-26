@@ -48,6 +48,10 @@ pi install git:github.com/elecnix/pi-agent-identity
 | `session_rename` | Let the agent rename its own session to reflect the task. The agent name stays as the prefix (`keen-gar-77: fix-auth-bug`). The description instructs the LLM to call it immediately on the first user message that conveys intent. |
 | `agent_search` | Search registered agents by (partial) name — exact matches rank first, then prefix matches — returning full registered intercom names and online/offline status. Resolves addresses from a short fragment without dumping hundreds of roster entries into the transcript. |
 
+## Offline targeting (#7)
+
+Ghost intercom registrations (disconnected-but-revivable agents) use a deterministic broker session ID (`agent-<agent-name>`) and carry the session's real working directory, so peers can target an offline agent with `intercom({ to: "agent-<agent-name>" })` and the queued message redelivers when the live session returns in the same project. `agent_search` surfaces this id for offline hits.
+
 ## Name minting
 
 Fresh names are drawn collision-free: before adopting a minted name, the extension queries the daemon's registry (`list_agents`) and re-rolls (up to 10 draws) if the name still belongs to a disconnected-but-revivable agent. This prevents a same-name remint from leaving messages stranded in a ghost intercom session (#34).

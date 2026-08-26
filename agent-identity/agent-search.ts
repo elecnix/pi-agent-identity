@@ -14,6 +14,8 @@ export interface AgentSearchEntry {
 	rosterName?: string;
 	/** Live/connected state, when known. */
 	connected?: boolean;
+	/** Stable broker id for offline targeting (`to: "<ghost-session-id>"`). */
+	ghostSessionId?: string;
 }
 
 interface RankedHit extends AgentSearchEntry {
@@ -64,7 +66,10 @@ export function formatAgentMatches(query: string, hits: readonly AgentSearchEntr
 		const full = hit.rosterName && hit.rosterName !== hit.name
 			? ` — registered as "${hit.rosterName}"`
 			: "";
-		return `- ${hit.name}${full}${status}`;
+		const ghost = !hit.connected && hit.ghostSessionId
+			? ` — while offline, targetable with to: "${hit.ghostSessionId}"`
+			: "";
+		return `- ${hit.name}${full}${status}${ghost}`;
 	});
 	return `${hits.length} match${hits.length === 1 ? "" : "es"} for "${query.trim()}":\n${lines.join("\n")}`;
 }

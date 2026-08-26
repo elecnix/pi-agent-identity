@@ -71,6 +71,14 @@ describe("formatAgentMatches", () => {
 		assert.match(text, /online|connected/i);
 	});
 
+	it("exposes the stable ghost session id for offline targeting (#7)", () => {
+		const pool: AgentSearchEntry[] = [
+			{ name: "keen-gar-77", connected: false, ghostSessionId: "agent-keen-gar-77" },
+		];
+		const text = formatAgentMatches("keen", searchAgents("keen", pool));
+		assert.match(text, /to: "agent-keen-gar-77"/);
+	});
+
 	it("mentions offline state for revivable agents", () => {
 		const text = formatAgentMatches("keen", searchAgents("keen", entries));
 		assert.match(text, /offline|revivable|disconnected/i);

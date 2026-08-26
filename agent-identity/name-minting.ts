@@ -41,21 +41,26 @@ export interface DaemonAgentListReply {
  * Parse an `agent_list` response into `{ name, connected }` pairs,
  * ignoring malformed entries and non-agent_list messages.
  */
-export function parseAgentListResponse(msg: DaemonAgentListReply): Array<{ name: string; connected: boolean }> {
+export interface DaemonAgentSummary {
+	name: string;
+	connected: boolean;
+	/** Stable broker id the agent presents while offline (#7). */
+	ghostSessionId?: string;
+}
+
+export function parseAgentListResponse(msg: DaemonAgentListReply): DaemonAgentSummary[] {
 	if (!msg || msg.type !== "agent_list" || !Array.isArray(msg.agents)) return [];
-	const out: Array<{ name: string; connected: boolean }> = [];
+	const out: DaemonAgentSummary[] = [];
 	for (const entry of msg.agents) {
-		if (
-			entry &&
-			typeof entry === "object" &&
-			typeof (entry as Record<string, unknown>).name === "string" &&
-			((entry as Record<string, unknown>).name as string).length > 0
-		) {
-			out.push({
-				name: (entry as Record<string, unknown>).name as string,
-				connected: Boolean((entry as Record<string, unknown>).connected),
-			});
-		}
+		const rec = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null;
+		if (!rec || typeof rec.name !== "string" || rec.name.length === 0) continue;
+		out.push({
+			name: rec.name,
+			connected: Boolean(rec.connected),
+			...(typeof rec.ghostSessionId === "string" && rec.ghostSessionId.length > 0
+				? { ghostSessionId: rec.ghostSessionId }
+				: {}),
+		});
 	}
 	return out;
 }
