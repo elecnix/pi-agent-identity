@@ -32,6 +32,7 @@ import {
 } from "./intercom-addressing.ts";
 import { pickFreshAgentName } from "./name-minting.ts";
 import { formatAgentMatches, searchAgents, type AgentSearchEntry } from "./agent-search.ts";
+import { buildAskRelayBody } from "./delivery-report.ts";
 import { buildReplyRelayBody, extractFailedReplyTarget } from "./reply-fallback.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
@@ -673,10 +674,14 @@ export default function (pi: ExtensionAPI) {
 				if (!targetName || !messageBody) return;
 				if (!agentName || !socket?.writable) return;
 
-				// A relayed reply is explicitly an async reply to the original thread.
+				// A relayed reply is explicitly an async reply to the original thread;
+				// a relayed ask tells the revived peer to answer back (#8).
 				const body = action === "reply"
 					? buildReplyRelayBody(agentName, messageBody)
-					: messageBody;
+					: action === "ask"
+						? buildAskRelayBody(agentName, messageBody)
+						: messageBody;
+				const wasAsk = action === "ask";
 
 				// Ask the daemon to deliver/relay, then wait for its verdict so
 				// the wording matches reality (live / revival / deferred /
@@ -704,7 +709,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{
 						type: "text",
-						text: buildRelayReport(targetName, outcome),
+						text: buildRelayReport(targetName, outcome, { wasAsk }),
 					}],
 					details: {
 						...d,

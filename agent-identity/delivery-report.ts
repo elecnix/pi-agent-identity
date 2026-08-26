@@ -41,7 +41,11 @@ export function isNameResolutionMiss(details: Record<string, unknown>): boolean 
  * - unresolved:no roster entry matched — say so instead of promising a
  *              revival.
  */
-export function buildRelayReport(targetName: string, outcome: RelayOutcome): string {
+export function buildRelayReport(
+	targetName: string,
+	outcome: RelayOutcome,
+	opts?: { wasAsk?: boolean },
+): string {
 	switch (outcome) {
 		case "live":
 			return [
@@ -49,6 +53,12 @@ export function buildRelayReport(targetName: string, outcome: RelayOutcome): str
 				`(The earlier "Session not found" was a name-resolution miss, not an offline peer.)`,
 			].join(" ");
 		case "revival":
+			if (opts?.wasAsk) {
+				return [
+					`⚠️ ${targetName} is offline — your ask cannot block on a revived session.`,
+					`Message relayed via daemon; they'll be revived to answer asynchronously.`,
+				].join(" ");
+			}
 			return `⚠️ ${targetName} is offline. Message relayed via daemon — their session will be revived to pick it up.`;
 		case "deferred":
 			return `⚠️ ${targetName}'s session process appears to be running but is not reachable via the daemon. The message was NOT relayed — no revival was attempted to avoid two writers on one session.`;
@@ -56,4 +66,15 @@ export function buildRelayReport(targetName: string, outcome: RelayOutcome): str
 		default:
 			return `⚠️ Could not deliver to ${targetName}: no matching agent in the roster, so nothing was relayed.`;
 	}
+}
+
+/** Build the mention body relayed when an `ask` had to go through revival (#8). */
+export function buildAskRelayBody(fromName: string, questionText: string): string {
+	return [
+		`📨 Intercom ASK from @${fromName} — they asked while you were offline:`,
+		"",
+		questionText.slice(0, 800),
+		"",
+		'Answer the questions and send them back with intercom({ action: "send", to: "' + fromName + '", message: "..." }).',
+	].join("\n");
 }

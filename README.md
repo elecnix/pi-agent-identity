@@ -48,6 +48,10 @@ pi install git:github.com/elecnix/pi-agent-identity
 | `session_rename` | Let the agent rename its own session to reflect the task. The agent name stays as the prefix (`keen-gar-77: fix-auth-bug`). The description instructs the LLM to call it immediately on the first user message that conveys intent. |
 | `agent_search` | Search registered agents by (partial) name — exact matches rank first, then prefix matches — returning full registered intercom names and online/offline status. Resolves addresses from a short fragment without dumping hundreds of roster entries into the transcript. |
 
+## Asking offline agents (#8)
+
+`ask` to an offline (ghost-registered) agent cannot block — a revived session has no reply-waiter. Instead of failing hard with "Session not found", the relay revives the target with the questions framed for an answer-back, and reports honestly that the reply will arrive asynchronously.
+
 ## Offline targeting (#7)
 
 Ghost intercom registrations (disconnected-but-revivable agents) use a deterministic broker session ID (`agent-<agent-name>`) and carry the session's real working directory, so peers can target an offline agent with `intercom({ to: "agent-<agent-name>" })` and the queued message redelivers when the live session returns in the same project. `agent_search` surfaces this id for offline hits.
