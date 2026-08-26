@@ -32,6 +32,7 @@ import {
 } from "./intercom-addressing.ts";
 import { pickFreshAgentName } from "./name-minting.ts";
 import { formatAgentMatches, searchAgents, type AgentSearchEntry } from "./agent-search.ts";
+import { buildReplyRelayBody, extractFailedReplyTarget } from "./reply-fallback.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -637,7 +638,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── Intercom failure → daemon relay ──────────────────────────────────
-	// When intercom send/ask fails, route via daemon and report honestly.
+	// When intercom send/ask/reply fails, route via daemon and report honestly.
 	// Disconnected agents already appear in the intercom broker's session list
 	// via ghost registration (daemon.ts), so no separate augmentation is needed.
 	pi.on("tool_result", async (event) => {
@@ -650,10 +651,30 @@ export default function (pi: ExtensionAPI) {
 			const d = event.details as Record<string, unknown>;
 			const delivered = d.delivered;
 			if (delivered === false) {
-				const targetName = input.to as string | undefined;
+				const action = typeof input.action === "string" ? input.action : "";
 				const messageBody = input.message as string | undefined;
+
+				// Reply failures don't carry `to` — pi-intercom only names the
+				// target in the human-readable result text (#6).
+				let targetName: string | undefined;
+				if (action === "reply") {
+					targetName = (typeof input.to === "string" && input.to.trim())
+						? input.to
+						: extractFailedReplyTarget(
+							(event.content as Array<{ type?: string; text?: string }> | undefined)
+								?.find((c) => c?.type === "text")?.text,
+						);
+				} else {
+					targetName = input.to as string | undefined;
+				}
+
 				if (!targetName || !messageBody) return;
 				if (!agentName || !socket?.writable) return;
+
+				// A relayed reply is explicitly an async reply to the original thread.
+				const body = action === "reply"
+					? buildReplyRelayBody(agentName, messageBody)
+					: messageBody;
 
 				// Ask the daemon to deliver/relay, then wait for its verdict so
 				// the wording matches reality (live / revival / deferred /
@@ -669,7 +690,7 @@ export default function (pi: ExtensionAPI) {
 							type: "queue_mention",
 							targetName,
 							fromName: agentName,
-							body: messageBody,
+							body,
 						}) + "\n");
 					} catch {
 						pendingRelays.delete(targetName);
