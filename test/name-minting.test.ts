@@ -61,6 +61,22 @@ describe("parseAgentListResponse", () => {
 		]);
 	});
 
+	it("passes through the stable ghost session id when present (#7)", () => {
+		const agents = parseAgentListResponse({
+			type: "agent_list",
+			agents: [
+				{ name: "cosmic-shark-5", connected: true },
+				{ name: "keen-gar-77", connected: false, ghostSessionId: "agent-keen-gar-77" },
+				{ name: "sleepy-otter-3", connected: false, ghostSessionId: 42 },
+			],
+		});
+		assert.deepEqual(agents, [
+			{ name: "cosmic-shark-5", connected: true },
+			{ name: "keen-gar-77", connected: false, ghostSessionId: "agent-keen-gar-77" },
+			{ name: "sleepy-otter-3", connected: false },
+		]);
+	});
+
 	it("ignores malformed entries and wrong message types", () => {
 		assert.deepEqual(parseAgentListResponse({ type: "pong" }), []);
 		assert.deepEqual(parseAgentListResponse({ type: "agent_list", agents: "nope" }), []);

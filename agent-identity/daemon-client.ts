@@ -154,7 +154,7 @@ function readHead(path: string, maxBytes: number): string {
  */
 export async function listDaemonAgents(
 	socketPath: string = DEFAULT_SOCKET_PATH,
-): Promise<Array<{ name: string; connected: boolean }>> {
+): Promise<Array<{ name: string; connected: boolean; ghostSessionId?: string }>> {
 	if (!isDaemonRunning(socketPath)) return [];
 
 	return new Promise((resolve) => {

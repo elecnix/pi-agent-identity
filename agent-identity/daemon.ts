@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { resolveAgentAddress } from "./session-addressing.ts";
+import { ghostSessionIdFor } from "./ghost-id.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -56,11 +57,13 @@ function ghostRegister(agentName: string, sessionFile: string): void {
   let reader: ReturnType<typeof createBrokerReader>;
 
   sock.on("connect", () => {
+    const reg = registry.get(agentName);
     brokerWrite(sock, {
       type: "register",
+      sessionId: ghostSessionIdFor(agentName),
       session: {
         name: agentName,
-        cwd: process.env["HOME"] ?? "/tmp",
+        cwd: reg?.cwd || process.env["HOME"] || "/tmp",
         model: "ghost",
         pid: process.pid,
         startedAt: Date.now(),
@@ -190,9 +193,9 @@ const REGISTRY_FILE = "/tmp/agent-identity-daemon-registry.json";
 
 function saveRegistry(): void {
   try {
-    const data: Record<string, { sessionFile: string; repo: string | null }> = {};
+    const data: Record<string, { sessionFile: string; repo: string | null; cwd?: string | null }> = {};
     for (const [name, reg] of registry) {
-      data[name] = { sessionFile: reg.sessionFile, repo: reg.repo };
+      data[name] = { sessionFile: reg.sessionFile, repo: reg.repo, cwd: reg.cwd };
     }
     fs.writeFileSync(REGISTRY_FILE, JSON.stringify(data), "utf-8");
   } catch {}
@@ -202,7 +205,7 @@ function loadRegistry(): void {
   try {
     if (!fs.existsSync(REGISTRY_FILE)) return;
     const raw = fs.readFileSync(REGISTRY_FILE, "utf-8");
-    const data = JSON.parse(raw) as Record<string, { sessionFile: string; repo: string | null }>;
+    const data = JSON.parse(raw) as Record<string, { sessionFile: string; repo: string | null; cwd?: string | null }>;
     for (const [name, info] of Object.entries(data)) {
       if (!registry.has(name)) {
         registry.set(name, {
@@ -212,6 +215,7 @@ function loadRegistry(): void {
           pid: 0,
           repo: info.repo,
           connected: false,
+          cwd: info.cwd ?? null,
         });
       }
     }
@@ -228,6 +232,9 @@ interface Registration {
   pid: number;
   repo: string | null;
   connected: boolean;
+  /** Session working directory — lets the ghost register under the same
+   *  name+cwd the live session will present on revival (#7). */
+  cwd: string | null;
 }
 
 const registry = new Map<string, Registration>();
@@ -238,9 +245,10 @@ function socketKey(sock: net.Socket): string {
 }
 
 function addRegistration(
-  data: { agentName: string; sessionFile: string; pid: number; repo?: string },
+  data: { agentName: string; sessionFile: string; pid: number; repo?: string; cwd?: string },
   sock: net.Socket,
 ): void {
+  const existingCwd = registry.get(data.agentName)?.cwd ?? null;
   // Replace old registration if exists
   const existing = registry.get(data.agentName);
   if (existing && existing.socket !== sock) {
@@ -255,6 +263,7 @@ function addRegistration(
     pid: data.pid,
     repo: data.repo ?? null,
     connected: true,
+    cwd: data.cwd?.trim() || existingCwd,
   };
 
   registry.set(data.agentName, reg);
@@ -360,6 +369,7 @@ function startServer(): net.Server {
             sessionFile?: string;
             pid?: number;
             repo?: string;
+            cwd?: string;
           };
 
           switch (msg.type) {
@@ -369,7 +379,7 @@ function startServer(): net.Server {
                 break;
               }
               addRegistration(
-                { agentName: msg.agentName, sessionFile: msg.sessionFile, pid: msg.pid, repo: msg.repo },
+                { agentName: msg.agentName, sessionFile: msg.sessionFile, pid: msg.pid, repo: msg.repo, cwd: msg.cwd },
                 sock,
               );
               safeWrite(sock, JSON.stringify({
@@ -396,6 +406,8 @@ function startServer(): net.Server {
                 name: r.agentName,
                 connected: r.connected,
                 repo: r.repo,
+                // Stable broker id the agent presents while offline (#7).
+                ...(r.connected ? {} : { ghostSessionId: ghostSessionIdFor(r.agentName) }),
               }));
               safeWrite(sock, JSON.stringify({ type: "agent_list", agents }) + "\n");
               break;
@@ -423,6 +435,7 @@ function startServer(): net.Server {
                 pid: reg.pid,
                 active,
                 repo: reg.repo,
+                ...(reg.connected ? {} : { ghostSessionId: ghostSessionIdFor(reg.agentName) }),
               }) + "\n");
               break;
             }
