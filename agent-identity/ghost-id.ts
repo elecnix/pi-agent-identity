@@ -1,14 +1,15 @@
 /**
  * Stable ghost session IDs (#7).
  *
- * The daemon's ghost intercom registrations (for disconnected-but-revivable
- * agents) previously received a random broker-assigned session ID, which
- * meant offline agents had no addressable `to: "<session-id>"` form. Ghosts
- * now register under a deterministic ID derived from the agent name, so the
- * same agent always presents the same ID whenever it is offline.
+ * Disconnected-but-revivable agents are hidden from the intercom roster
+ * list — the daemon no longer registers them with the broker. They stay
+ * addressable while offline under a deterministic ID derived from the
+ * agent name, so the same agent always presents the same offline id.
+ * The daemon resolves this id in queue_mention/lookup_agent, so a sender
+ * who found the agent via agent_search can message it and trigger revival.
  */
 
-/** Deterministic broker sessionId for a ghost-registered agent. */
+/** Deterministic id for targeting a ghosted (offline, revivable) agent. */
 export function ghostSessionIdFor(agentName: string): string {
 	return `agent-${agentName}`;
 }
