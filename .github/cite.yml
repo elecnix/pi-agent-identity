@@ -1,0 +1,11 @@
+# Cite reviewer configuration — https://github.com/elecnix/cite
+#
+# The default review deadline is derived from the output cap
+# (60s base + max_output_tokens / 128 tok/s; with the built-in 32768-token
+# cap that is ~316s). The deepseek-v4-flash endpoint regularly exceeds that
+# on large files, killing review calls with "context deadline exceeded"
+# and failing the whole run as COULD_NOT_EVALUATE. Raise the review
+# timeout explicitly; everything else keeps its defaults.
+roles:
+  review:
+    timeout: 600s
