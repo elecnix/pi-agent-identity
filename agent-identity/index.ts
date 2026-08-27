@@ -31,6 +31,7 @@ import {
 	type RosterSession,
 } from "./intercom-addressing.ts";
 import { pickFreshAgentName } from "./name-minting.ts";
+import { maybeSuffixForkIdentity } from "./fork-identity.ts";
 import { formatAgentMatches, searchAgents, type AgentSearchEntry } from "./agent-search.ts";
 import { buildAskRelayBody } from "./delivery-report.ts";
 import { buildReplyRelayBody, extractFailedReplyTarget } from "./reply-fallback.ts";
@@ -488,6 +489,26 @@ export default function (pi: ExtensionAPI) {
 				if (data?.ids) {
 					for (const id of data.ids) seenMentionIds.add(id);
 				}
+			}
+		}
+
+		// Fork disambiguation (#43): a forked subtask copies the parent's
+		// entries — including the agent-identity-name entry — so a restored
+		// fork would come up live under the parent's name. Re-identify it
+		// with a deterministic suffix derived from its own session id, and
+		// record the corrected name so the session file (the durable source
+		// of truth for revival) matches the live identity. On a later reload
+		// the corrected entry wins the restore loop and the idempotent
+		// suffix check skips the re-append.
+		if (agentName) {
+			const restoredName = agentName;
+			agentName = maybeSuffixForkIdentity(
+				agentName,
+				ctx.sessionManager.getHeader(),
+				ctx.sessionManager.getSessionId(),
+			);
+			if (agentName !== restoredName) {
+				pi.appendEntry("agent-identity-name", { name: agentName });
 			}
 		}
 
