@@ -38,6 +38,21 @@ describe("searchAgents", () => {
 		assert.equal(hits[0]!.rosterName, "cosmic-shark-5: test-harness-launcher-staging");
 	});
 
+	it("finds a hidden (offline) agent by its stable ghost id", () => {
+		// Ghosts are hidden from the intercom roster — the id is the only
+		// other handle a sender has besides the bare name.
+		const pool: AgentSearchEntry[] = [
+			{ name: "storm-skua-52", connected: false, ghostSessionId: "agent-storm-skua-52" },
+		];
+		const exact = searchAgents("agent-storm-skua-52", pool);
+		assert.equal(exact.length, 1);
+		assert.equal(exact[0]!.name, "storm-skua-52");
+
+		const prefix = searchAgents("agent-storm", pool);
+		assert.equal(prefix.length, 1);
+		assert.equal(prefix[0]!.name, "storm-skua-52");
+	});
+
 	it("ranks exact matches above prefix matches", () => {
 	 const pool: AgentSearchEntry[] = [
 			{ name: "lucid-tiger-82", connected: true },

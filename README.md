@@ -8,7 +8,7 @@ Gives each pi session a unique persistent identity so AI agents can collaborate 
 ## Architecture
 
 - **Pi extension** (`agent-identity/index.ts`): Name generation, system prompt identity rules, daemon client, git commit co-author hook
-- **Detached daemon** (`agent-identity/daemon.ts`): Singleton Unix socket server, ghost intercom sessions, disconnected session revival
+- **Detached daemon** (`agent-identity/daemon.ts`): Singleton Unix socket server, offline (ghost) agent tracking, disconnected session revival
 
 ## Install
 
@@ -20,7 +20,7 @@ pi install git:github.com/elecnix/pi-agent-identity
 
 1. Each pi session gets a random name like `swift-koala-42`
 2. Sessions register with a **detached singleton daemon** via Unix socket
-3. The daemon maintains **ghost intercom sessions** for disconnected agents so they remain reachable
+3. The daemon keeps tracking **disconnected agents** so they remain reachable — but hidden from the intercom roster list; `agent_search` finds them by name or ghost id
 4. **Disconnected sessions are revived**: the daemon spawns `pi --session <file> -p "message"` when an intercom message arrives for an offline agent
 5. **Agent lookup**: The daemon exposes a `lookup_agent` message so pi core can resolve agent names to session files, enabling `--session <name>` (requires pi >= next release after PR [earendil-works/pi#5987](https://github.com/earendil-works/pi/pull/5987))
 6. **Filesystem fallback**: If the daemon has no record of an agent (e.g. after a reboot wiped its `/tmp` registry), lookup falls back to scanning `~/.pi/agent/sessions/**/*.jsonl` for the session whose embedded `agent-identity-name` matches, and resumes the most recent one. The daemon registry is a cache; the session files are the durable source of truth. Override the scan root with `PI_SESSIONS_DIR`.
@@ -50,12 +50,12 @@ pi install git:github.com/elecnix/pi-agent-identity
 
 ## Asking offline agents (#8)
 
-`ask` to an offline (ghost-registered) agent cannot block — a revived session has no reply-waiter. Instead of failing hard with "Session not found", the relay revives the target with the questions framed for an answer-back, and reports honestly that the reply will arrive asynchronously.
+`ask` to an offline (revivable) agent cannot block — a revived session has no reply-waiter. Instead of failing hard with "Session not found", the relay revives the target with the questions framed for an answer-back, and reports honestly that the reply will arrive asynchronously.
 
-## Offline targeting (#7)
+## Offline targeting (#7) and hidden ghosts
 
-Ghost intercom registrations (disconnected-but-revivable agents) use a deterministic broker session ID (`agent-<agent-name>`) and carry the session's real working directory, so peers can target an offline agent with `intercom({ to: "agent-<agent-name>" })` and the queued message redelivers when the live session returns in the same project. `agent_search` surfaces this id for offline hits.
+Disconnected-but-revivable agents are **hidden from the intercom roster list** (the daemon no longer registers ghost sessions with the broker). They stay addressable under a deterministic id (`agent-<agent-name>`): `agent_search` surfaces offline agents with this id, and a message sent by name or id that fails at the broker is routed through the daemon's `queue_mention`, which revives the real session. The queued message redelivers when the live session returns in the same project.
 
 ## Name minting
 
-Fresh names are drawn collision-free: before adopting a minted name, the extension queries the daemon's registry (`list_agents`) and re-rolls (up to 10 draws) if the name still belongs to a disconnected-but-revivable agent. This prevents a same-name remint from leaving messages stranded in a ghost intercom session (#34).
+Fresh names are drawn collision-free: before adopting a minted name, the extension queries the daemon's registry (`list_agents`) and re-rolls (up to 10 draws) if the name still belongs to a disconnected-but-revivable agent. This prevents a same-name remint from splitting an identity's message routing (#34).

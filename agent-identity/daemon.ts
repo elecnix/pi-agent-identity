@@ -6,6 +6,12 @@
  * Pi sessions register via Unix socket; the daemon delivers intercom
  * messages via session revival when targets are disconnected.
  *
+ * Disconnected-but-revivable agents are NOT registered with the intercom
+ * broker — they stay hidden from the normal roster list. They remain
+ * reachable by name or by their stable ghost id (`agent-<name>`, see
+ * ghost-id.ts): agent_search surfaces them, and a message routed here
+ * (queue_mention) revives the real session.
+ *
  * Start:   npx tsx daemon.ts
  * Stop:    kill $(cat /tmp/agent-identity-daemon.pid)
  * Socket:  /tmp/agent-identity-daemon.sock
@@ -16,10 +22,7 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
-import { join } from "node:path";
-import { resolveAgentAddress } from "./session-addressing.ts";
+import { resolveDaemonTarget, toAddressable } from "./daemon-targeting.ts";
 import { ghostSessionIdFor } from "./ghost-id.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -31,117 +34,6 @@ const PID_FILE = "/tmp/agent-identity-daemon.pid";
 const SOCK_FILE = "/tmp/agent-identity-daemon.sock";
 const LOG_FILE = "/tmp/agent-identity-daemon.log";
 
-const INTERCOM_BROKER = join(homedir(), ".pi/agent/intercom/broker.sock");
-
-// ─── Intercom broker framing (inlined for standalone daemon) ────────────────
-
-function brokerWrite(sock: net.Socket, msg: unknown): void {
-  const json = JSON.stringify(msg);
-  const payload = Buffer.from(json, "utf-8");
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length, 0);
-  sock.write(Buffer.concat([header, payload]));
-}
-
-// ─── Ghost session manager ──────────────────────────────────────────────────
-// Maintains intercom broker connections for disconnected agents so they
-// appear online and can receive messages (which trigger session revival).
-
-const ghostSessions = new Map<string, { sock: net.Socket; agentName: string; sessionFile: string }>();
-
-function ghostRegister(agentName: string, sessionFile: string): void {
-  if (ghostSessions.has(agentName)) return;
-  if (!fs.existsSync(INTERCOM_BROKER)) return; // intercom not running
-
-  const sock = net.createConnection(INTERCOM_BROKER);
-  let reader: ReturnType<typeof createBrokerReader>;
-
-  sock.on("connect", () => {
-    const reg = registry.get(agentName);
-    brokerWrite(sock, {
-      type: "register",
-      sessionId: ghostSessionIdFor(agentName),
-      session: {
-        name: agentName,
-        cwd: reg?.cwd || process.env["HOME"] || "/tmp",
-        model: "ghost",
-        pid: process.pid,
-        startedAt: Date.now(),
-        lastActivity: Date.now(),
-        status: "💤 revivable",
-      },
-    });
-    log(`Ghost registered in intercom: ${agentName}`);
-  });
-
-  reader = createBrokerReader((msg: Record<string, unknown>) => {
-    if (msg.type === "send" || msg.type === "ask") {
-      const message = msg.message as Record<string, unknown> | undefined;
-      const text = message?.content && typeof message.content === "object"
-        ? (message.content as Record<string, unknown>).text as string ?? ""
-        : "";
-      const from = (msg.from as string) ?? "unknown";
-      log(`Ghost received intercom ${msg.type} for ${agentName} from ${from}`);
-      // Revive the real session
-      const reg = registry.get(agentName);
-      if (reg) {
-        resumeSession(reg, {
-          from, prNumber: 0,
-          body: `📨 Intercom ${msg.type} from @${from}:\n\n${String(text).slice(0, 800)}\n\nReply using intercom({ action: "reply", message: "..." }).`,
-          url: "", repo: reg.repo ?? "", agentName, commentId: Date.now(),
-        });
-      }
-    }
-    if (msg.type === "session_joined") {
-      // Real session came online — kill ghost
-      const session = msg.session as Record<string, unknown> | undefined;
-      if (session?.name === agentName) {
-        log(`Real session joined for ${agentName}, removing ghost`);
-        ghostRemove(agentName);
-      }
-    }
-  }, (err: Error) => {
-    log(`Ghost broker error for ${agentName}: ${err.message}`);
-    ghostRemove(agentName);
-  });
-
-  sock.on("data", (data: Buffer) => reader(data));
-  sock.on("close", () => ghostRemove(agentName));
-  sock.on("error", () => ghostRemove(agentName));
-
-  ghostSessions.set(agentName, { sock, agentName, sessionFile });
-}
-
-function ghostRemove(agentName: string): void {
-  const g = ghostSessions.get(agentName);
-  if (!g) return;
-  ghostSessions.delete(agentName);
-  try { g.sock.destroy(); } catch {}
-  log(`Ghost removed: ${agentName}`);
-}
-
-function createBrokerReader(
-  onMessage: (msg: Record<string, unknown>) => void,
-  onError: (err: Error) => void,
-) {
-  let buf = Buffer.alloc(0);
-  return (data: Buffer) => {
-    buf = Buffer.concat([buf, data]);
-    while (buf.length >= 4) {
-      const len = buf.readUInt32BE(0);
-      if (buf.length < 4 + len) break;
-      const payload = buf.subarray(4, 4 + len);
-      buf = buf.subarray(4 + len);
-      try {
-        const msg = JSON.parse(payload.toString("utf-8")) as Record<string, unknown>;
-        onMessage(msg);
-      } catch (err) {
-        onError(err instanceof Error ? err : new Error(String(err)));
-        return;
-      }
-    }
-  };
-}
 
 // ─── Singleton ──────────────────────────────────────────────────────────────
 
@@ -270,9 +162,6 @@ function addRegistration(
   socketRegistry.set(socketKey(sock), reg);
   saveRegistry();
 
-  // Kill ghost if we had one (real session is back)
-  ghostRemove(data.agentName);
-
   log(`Registered: ${data.agentName} (session: ${path.basename(data.sessionFile)})${reg.repo ? ` repo: ${reg.repo}` : ""}`);
 }
 
@@ -297,8 +186,8 @@ function removeBySocket(sock: net.Socket): void {
     socketRegistry.delete(key);
     saveRegistry();
     log(`Agent disconnected (revivable): ${reg.agentName}`);
-    // Create ghost intercom session so agent appears online
-    ghostRegister(reg.agentName, reg.sessionFile);
+    // Stays hidden from the intercom roster — revival happens when a
+    // message is routed here via queue_mention.
   }
 }
 
@@ -418,10 +307,10 @@ function startServer(): net.Server {
                 safeWrite(sock, JSON.stringify({ type: "error", message: "lookup_agent requires agentName" }) + "\n");
                 break;
               }
-              // Tolerant lookup: exact name first, then a composite
-              // `<name>: <suffix>` match so a bare agent name still resolves
-              // after session_rename.
-              const reg = resolveAgentAddress(msg.agentName, Array.from(registry.values()));
+              // Tolerant lookup: exact name, composite `<name>: <suffix>`,
+              // or stable ghost id (`agent-<name>`) so offline agents
+              // resolve by name or by the id agent_search advertises.
+              const reg = resolveDaemonTarget(msg.agentName, toAddressable(Array.from(registry.values())));
               if (!reg) {
                 safeWrite(sock, JSON.stringify({ type: "agent_not_found", agentName: msg.agentName }) + "\n");
                 break;
@@ -449,10 +338,11 @@ function startServer(): net.Server {
                 safeWrite(sock, JSON.stringify({ type: "error", message: "queue_mention requires targetName, fromName, body" }) + "\n");
                 break;
               }
-              // Tolerant resolution: exact registry hit first, then a
-              // composite `<name>: <suffix>` match (session_rename renames
-              // sessions to that form while peers address the bare name).
-              const target = resolveAgentAddress(targetName, Array.from(registry.values()));
+              // Tolerant resolution: exact registry hit, composite
+              // `<name>: <suffix>` match (session_rename renames sessions to
+              // that form while peers address the bare name), or ghost id
+              // for hidden offline agents.
+              const target = resolveDaemonTarget(targetName, toAddressable(Array.from(registry.values())));
               if (!target) {
                 // Name-resolution miss — report it honestly instead of
                 // letting the caller claim an offline/revived peer.
@@ -538,7 +428,6 @@ function startServer(): net.Server {
 
 function cleanup(server: net.Server): void {
   log("Shutting down...");
-  for (const [name] of ghostSessions) ghostRemove(name);
   for (const reg of registry.values()) {
     if (reg.socket) try { reg.socket.end(); } catch {}
   }

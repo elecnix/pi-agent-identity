@@ -14,7 +14,7 @@ export interface AgentSearchEntry {
 	rosterName?: string;
 	/** Live/connected state, when known. */
 	connected?: boolean;
-	/** Stable broker id for offline targeting (`to: "<ghost-session-id>"`). */
+	/** Stable id for targeting an offline (ghosted, revivable) agent. */
 	ghostSessionId?: string;
 }
 
@@ -25,9 +25,14 @@ interface RankedHit extends AgentSearchEntry {
 /**
  * Filter and rank `entries` against `query`:
  *   rank 0 — exact match on the bare name
- *   rank 1 — bare-name prefix match
+ *   rank 0 — exact match on the bare name or the ghost id (`agent-<name>`)
+ *   rank 1 — bare-name prefix match (or ghost-id prefix)
  * Ties are broken by shorter name, then alphabetically. Returns at most
  * `limit` hits (default 10).
+ *
+ * Ghosted (disconnected-but-revivable) agents are hidden from the intercom
+ * roster list, so this search is the only way to find them — matching on
+ * the bare name or the stable ghost id both work.
  */
 export function searchAgents(
 	query: string,
@@ -40,9 +45,10 @@ export function searchAgents(
 	const ranked: RankedHit[] = [];
 	for (const entry of entries) {
 		const name = entry.name.toLowerCase();
+		const ghostId = entry.ghostSessionId?.toLowerCase();
 		let rank: number | null = null;
-		if (name === wanted) rank = 0;
-		else if (name.startsWith(wanted)) rank = 1;
+		if (name === wanted || ghostId === wanted) rank = 0;
+		else if (name.startsWith(wanted) || ghostId?.startsWith(wanted)) rank = 1;
 		if (rank !== null) ranked.push({ ...entry, rank });
 	}
 
@@ -67,7 +73,7 @@ export function formatAgentMatches(query: string, hits: readonly AgentSearchEntr
 			? ` — registered as "${hit.rosterName}"`
 			: "";
 		const ghost = !hit.connected && hit.ghostSessionId
-			? ` — while offline, targetable with to: "${hit.ghostSessionId}"`
+			? ` — while offline (hidden from intercom list), targetable with to: "${hit.ghostSessionId}" or by name; a message revives the agent via the daemon`
 			: "";
 		return `- ${hit.name}${full}${status}${ghost}`;
 	});

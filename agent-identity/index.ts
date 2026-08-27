@@ -519,8 +519,8 @@ export default function (pi: ExtensionAPI) {
 				agentName = envName;
 			} else {
 				// Collision-free mint (#34): a name still in the daemon roster
-				// belongs to a disconnected-but-revivable agent whose ghost
-				// intercom session would swallow this session's messages.
+				// belongs to a disconnected-but-revivable agent; reusing it
+				// would split that identity's message routing.
 				const takenNames = new Set<string>();
 				try {
 					for (const agent of await listDaemonAgents()) takenNames.add(agent.name);
@@ -663,8 +663,9 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Intercom failure → daemon relay ──────────────────────────────────
 	// When intercom send/ask/reply fails, route via daemon and report honestly.
-	// Disconnected agents already appear in the intercom broker's session list
-	// via ghost registration (daemon.ts), so no separate augmentation is needed.
+	// Disconnected agents are hidden from the intercom roster (no ghost
+	// registration), so sends to them fail here and get revived through
+	// the daemon's queue_mention.
 	pi.on("tool_result", async (event) => {
 		if (event.toolName !== "intercom") return;
 
