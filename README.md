@@ -59,3 +59,13 @@ Disconnected-but-revivable agents are **hidden from the intercom roster list** (
 ## Name minting
 
 Fresh names are drawn collision-free: before adopting a minted name, the extension queries the daemon's registry (`list_agents`) and re-rolls (up to 10 draws) if the name still belongs to a disconnected-but-revivable agent. This prevents a same-name remint from splitting an identity's message routing (#34).
+
+## Bash environment
+
+The extension exposes the agent identity to every LLM-callable `bash` subprocess as `PI_AGENT_NAME`. The name is set on the pi process at session start via `process.env`, so spawned shell children inherit it; pi resolves the bash env per execution, so every bash tool command sees the current agent name.
+
+pi core's own session metadata vars (`PI_SESSION_ID`, `PI_PROVIDER`, `PI_REASONING_LEVEL`, etc.) are unaffected. To pin an identity before launch, just pass `AGENT_IDENTITY_NAME` (already used for testing and daemon revival):
+
+```bash
+AGENT_IDENTITY_NAME=swift-koala-42 pi -p "run a bash command"
+```
