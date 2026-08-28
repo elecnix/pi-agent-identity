@@ -35,6 +35,7 @@ import { maybeSuffixForkIdentity } from "./fork-identity.ts";
 import { formatAgentMatches, searchAgents, type AgentSearchEntry } from "./agent-search.ts";
 import { buildAskRelayBody } from "./delivery-report.ts";
 import { buildReplyRelayBody, extractFailedReplyTarget } from "./reply-fallback.ts";
+import { applyAgentNameEnv } from "./env.ts";
 
 // ─── Name generation ────────────────────────────────────────────────────────
 
@@ -529,6 +530,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			pi.appendEntry("agent-identity-name", { name: agentName });
 		}
+
+		// Expose the identity to every LLM-callable bash subprocess. Pi builds
+		// the bash tool's child env per execution spreading process.env, so
+		// setting the var here makes it inherit into every bash tool command.
+		applyAgentNameEnv(process.env, agentName);
 
 		// Set session name
 		pi.setSessionName(agentName);
