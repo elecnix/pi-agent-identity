@@ -44,9 +44,9 @@ flowchart LR
     subgraph Daemon["agent-identity daemon<br />(singleton, unix socket)"]
         D1["registry: agent-name → session-file<br />pid, connected flag, cwd, repo"]
     end
-    S1 --| "message frames" | B1
-    S2 --| "register / lookup / queue_mention" | D1
-    D1 -. "revival: spawn pi --session &lt;file&gt; -p &lt;msg&gt;" .-> R1
+    S1 -->|message frames| B1
+    S2 -->|register / lookup / queue_mention| D1
+    D1 -.->|revival: spawn pi with saved session| R1
     R1["revived pi session (receiver)"]
 ```
 
@@ -124,7 +124,7 @@ flowchart TD
     C -->|yes| L[method: live<br />deliver over daemon socket]
     C -->|no| A{process pid alive?}
     A -->|yes| DF[method: deferred<br />do NOT spawn - two writers risk<br />on one session file]
-    A -->|no| SP[revive: spawn pi --session file -p msg]
+    A -->|no| SP[revive: spawn pi on saved session file]
     SP --> V[method: revival]
 ```
 
