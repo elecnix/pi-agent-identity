@@ -1,11 +1,7 @@
-# Cite reviewer configuration — https://github.com/elecnix/cite
+# Identical in every repository that uses Cite.
 #
-# The default review deadline is derived from the output cap
-# (60s base + max_output_tokens / 128 tok/s; with the built-in 32768-token
-# cap that is ~316s). The deepseek-v4-flash endpoint regularly exceeds that
-# on large files, killing review calls with "context deadline exceeded"
-# and failing the whole run as COULD_NOT_EVALUATE. Raise the review
-# timeout explicitly; everything else keeps its defaults.
-roles:
-  review:
-    timeout: 600s
+# Cite's defaults cover everything else. require_parameters keeps an
+# OpenRouter-style router from choosing an endpoint that drops
+# response_format when CITE_PROVIDER selects the OpenRouter leg; Ollama
+# ignores the field.
+require_parameters: true
