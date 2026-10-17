@@ -8,11 +8,19 @@
  * The signing rules here are the contract for how an agent puts its name on
  * version-control metadata: commit co-authorship trailers, PR descriptions,
  * and Linear ticket comments. PR descriptions and Linear comments are
- * human-readable prose, so the agent signs them with a robot emoji to make
- * it clear a machine wrote the line. The commit `Co-authored-by` trailer is
- * structured git metadata, so it stays clean — an emoji there would corrupt
+ * human-readable prose, so the agent signs them with the agent name as
+ * hyperlink markdown pointing at this extension, followed by a robot emoji to
+ * make it clear a machine wrote the line. The commit `Co-authored-by` trailer
+ * is structured git metadata, so it stays clean — an emoji there would corrupt
  * the trailer.
  */
+
+/**
+ * Canonical URL of the extension that mints the identity. Every signature the
+ * prompt asks for links back here, so a reader of a PR or a Linear issue can
+ * tell which extension produced the agent that signed it.
+ */
+export const IDENTITY_EXTENSION_URL = "https://github.com/elecnix/pi-agent-identity";
 
 /**
  * Build the `<agent_identity>` system-prompt block for the given agent name.
@@ -31,9 +39,9 @@ Strictly follow these identity rules:
    \`Co-authored-by: ${name} <${name}@pi-agent.local>\`
 
 2. **PR descriptions**: When you create or update a pull request description, append the line:
-   \`— ${name} 🤖\` at the very end (on its own line).
+   \`— [${name}](${IDENTITY_EXTENSION_URL}) 🤖\` at the very end (on its own line) — hyperlink markdown linking your agent name to the extension that minted it.
 
-3. **Linear tickets**: When commenting on or updating a Linear issue, append \`— ${name} 🤖\` at the very end.
+3. **Linear tickets**: When commenting on or updating a Linear issue, append \`— [${name}](${IDENTITY_EXTENSION_URL}) 🤖\` at the very end — hyperlink markdown linking your agent name to the extension that minted it.
 
 4. **@mentioning other agents**: You can @mention other agents by their lowercase-kebab name in GitHub PR comments and Linear issue comments. They will detect your mention and respond.
 

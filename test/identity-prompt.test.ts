@@ -8,7 +8,7 @@
 
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
-import { buildIdentityPrompt } from "../agent-identity/identity-prompt.ts";
+import { buildIdentityPrompt, IDENTITY_EXTENSION_URL } from "../agent-identity/identity-prompt.ts";
 
 describe("buildIdentityPrompt", () => {
 	const name = "steady-panda-28";
@@ -22,35 +22,75 @@ describe("buildIdentityPrompt", () => {
 		assert.match(prompt, /<agent_identity>/);
 	});
 
-	describe("signing with a robot emoji", () => {
-		it("instructs the agent to append a robot emoji when signing PR descriptions", () => {
-			// Rule 2 — PR descriptions must end with `— <name> 🤖`.
-			assert.match(
-				prompt,
-				/— steady-panda-28 🤖/,
-				"PR description signature must include the robot emoji",
-			);
+	describe("signing with hyperlink markdown and a robot emoji", () => {
+		// Rules 2 (PR descriptions) and 3 (Linear tickets) must each end with the
+		// agent name as a markdown link to the extension that minted it,
+		// followed by the robot emoji.
+		const signature = `— [${name}](${IDENTITY_EXTENSION_URL}) 🤖`;
+		const plain = `— ${name} 🤖`;
+
+		/**
+		 * Text of the numbered identity rule whose bold title matches, including
+		 * its continuation lines. Asserting per rule is what makes each signing
+		 * rule independently covered: a whole-prompt count would still pass if one
+		 * rule carried the signature twice and the other carried the plain form.
+		 */
+		const ruleBody = (title: string): string => {
+			const block = prompt
+				.split(/\n(?=\d+\. \*\*)/)
+				.find((b) => b.includes(`**${title}**`));
+			if (!block) throw new Error(`identity rule "${title}" must exist in the prompt`);
+			return block;
+		};
+
+		it("points the signature link at this extension", () => {
+			// The whole point of the hyperlink is that a reader can find the
+			// extension that minted the agent, so the URL must not drift to a
+			// different repository.
+			assert.equal(IDENTITY_EXTENSION_URL, "https://github.com/elecnix/pi-agent-identity");
 		});
 
-		it("instructs the agent to append a robot emoji when signing Linear comments", () => {
-			// Rule 3 — Linear tickets must end with `— <name> 🤖`.
-			// The prompt has two signing rules; both must carry the emoji.
-			const matches = prompt.match(/— steady-panda-28 🤖/g);
+		it("signs PR descriptions with the hyperlink signature", () => {
 			assert.ok(
-				matches && matches.length >= 2,
-				"both PR-description and Linear-ticket signing rules must use the emoji signature",
+				ruleBody("PR descriptions").includes(signature),
+				"the PR-description rule must hyperlink the agent name to the minting extension",
 			);
 		});
 
-		it("does not put a robot emoji in the commit co-authorship trailer", () => {
+		it("signs Linear comments with the hyperlink signature", () => {
+			assert.ok(
+				ruleBody("Linear tickets").includes(signature),
+				"the Linear-ticket rule must hyperlink the agent name to the minting extension",
+			);
+		});
+
+		it("offers no unlinked signature in either signing rule", () => {
+			// The plain-text signature must be gone, otherwise an agent may still
+			// sign without the link.
+			for (const title of ["PR descriptions", "Linear tickets"]) {
+				assert.equal(
+					ruleBody(title).includes(plain),
+					false,
+					`the ${title} rule must not offer an unlinked signature`,
+				);
+			}
+			assert.equal(prompt.includes(plain), false, "the prompt must not offer an unlinked signature");
+		});
+
+		it("does not put a robot emoji or a link in the commit co-authorship trailer", () => {
 			// Rule 1 — git Co-authored-by trailers are structured metadata;
-			// an emoji there would corrupt the trailer. The trailer line
-			// must stay clean.
+			// an emoji or markdown there would corrupt the trailer. The trailer
+			// line must stay clean.
 			assert.match(prompt, /Co-authored-by: steady-panda-28 <steady-panda-28@pi-agent\.local>/);
 			assert.doesNotMatch(
 				prompt,
 				/Co-authored-by:[^\n]*🤖/,
 				"the co-authorship trailer must not carry the robot emoji",
+			);
+			assert.doesNotMatch(
+				prompt,
+				/Co-authored-by:[^\n]*\[/,
+				"the co-authorship trailer must not carry markdown link syntax",
 			);
 		});
 	});
