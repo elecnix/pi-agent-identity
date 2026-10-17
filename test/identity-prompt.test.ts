@@ -23,9 +23,25 @@ describe("buildIdentityPrompt", () => {
 	});
 
 	describe("signing with hyperlink markdown and a robot emoji", () => {
-		// Rule 2 — PR descriptions must end with the agent name as a markdown
-		// link to the extension that minted it, followed by the robot emoji.
+		// Rules 2 (PR descriptions) and 3 (Linear tickets) must each end with the
+		// agent name as a markdown link to the extension that minted it,
+		// followed by the robot emoji.
 		const signature = `— [${name}](${IDENTITY_EXTENSION_URL}) 🤖`;
+		const plain = `— ${name} 🤖`;
+
+		/**
+		 * Text of the numbered identity rule whose bold title matches, including
+		 * its continuation lines. Asserting per rule is what makes each signing
+		 * rule independently covered: a whole-prompt count would still pass if one
+		 * rule carried the signature twice and the other carried the plain form.
+		 */
+		const ruleBody = (title: string): string => {
+			const block = prompt
+				.split(/\n(?=\d+\. \*\*)/)
+				.find((b) => b.includes(`**${title}**`));
+			if (!block) throw new Error(`identity rule "${title}" must exist in the prompt`);
+			return block;
+		};
 
 		it("points the signature link at this extension", () => {
 			// The whole point of the hyperlink is that a reader can find the
@@ -34,31 +50,31 @@ describe("buildIdentityPrompt", () => {
 			assert.equal(IDENTITY_EXTENSION_URL, "https://github.com/elecnix/pi-agent-identity");
 		});
 
-		it("instructs the agent to sign PR descriptions with a markdown link to this extension", () => {
+		it("signs PR descriptions with the hyperlink signature", () => {
 			assert.ok(
-				prompt.includes(signature),
-				"PR description signature must hyperlink the agent name to the minting extension",
+				ruleBody("PR descriptions").includes(signature),
+				"the PR-description rule must hyperlink the agent name to the minting extension",
 			);
 		});
 
-		it("instructs the agent to sign Linear comments the same way", () => {
-			// Rule 3 — Linear tickets must use the same signature as PR descriptions.
-			// The prompt has two signing rules; both must carry the hyperlink form.
-			const occurrences = prompt.split(signature).length - 1;
+		it("signs Linear comments with the hyperlink signature", () => {
 			assert.ok(
-				occurrences >= 2,
-				`expected the hyperlink signature in both signing rules, found ${occurrences}`,
+				ruleBody("Linear tickets").includes(signature),
+				"the Linear-ticket rule must hyperlink the agent name to the minting extension",
 			);
 		});
 
-		it("does not offer an unlinked signature anywhere", () => {
-			// The old plain-text signature must be gone, otherwise an agent may
-			// still sign without the link.
-			assert.equal(
-				prompt.includes(`— ${name} 🤖`),
-				false,
-				"the prompt must not offer an unlinked signature variant",
-			);
+		it("offers no unlinked signature in either signing rule", () => {
+			// The plain-text signature must be gone, otherwise an agent may still
+			// sign without the link.
+			for (const title of ["PR descriptions", "Linear tickets"]) {
+				assert.equal(
+					ruleBody(title).includes(plain),
+					false,
+					`the ${title} rule must not offer an unlinked signature`,
+				);
+			}
+			assert.equal(prompt.includes(plain), false, "the prompt must not offer an unlinked signature");
 		});
 
 		it("does not put a robot emoji or a link in the commit co-authorship trailer", () => {
